@@ -1,6 +1,6 @@
 # T3 — Box deploy + dsh-deploy swap (remove model-capacity) + end-to-end proof
 
-**Status:** pending
+**Status:** done
 **Repos:** `chrisjohnson/local-ai-machine`, `chrisjohnson/dsh-deploy`
 **Depends on:** T1 + T2 done (tags pushed)
 **Human-authorized:** Chris explicitly authorized restarting the production `dsh` service as
@@ -124,4 +124,68 @@ tan acquire --model medium-dense --kind interactive-chat --desc "e2e hold" --hol
 
 ## Evidence
 
-(paste verification output + e2e transcript here before marking done)
+### Version chain (all pushed)
+
+| repo | ref | what |
+|---|---|---|
+| `chrisjohnson/take-a-number` | `29e28b9`, tag **v0.1.4** | daemon + client (v0.1.3 audit denormalization, v0.1.4 anonymous stream subscriptions) |
+| `chrisjohnson/dsh-plugins` | `b6c215e`, tag **dsh-take-a-number-v0.1.2** | plugin dep → take-a-number v0.1.4 |
+| `chrisjohnson/dsh-deploy` | `77533281ade2c90ab526eb3e322fc85279c701de` | pin dsh-take-a-number v0.1.2 (both trees), cordis row |
+| `chrisjohnson/local-ai-machine` | `f6810d3` | tan user + units, `/etc/take-a-number/config.json`, `/etc/dsh-deploy-pin` = 7753328… |
+
+### Deploy
+
+- `deploy.sh` (local-ai-machine) ended `VERIFY OK` (two switches: initial `9322c15`, pin bump `f6810d3`).
+- `systemd.services`: `take-a-number-checkout` active (RemainAfterExit), `take-a-number` active.
+- `sudo systemctl start dsh-deploy-update` → journal: `Finished dsh-deploy: reset /home/dsh/dsh-deploy to /etc/dsh-deploy-pin, pnpm install, restart dsh.` (ran as `dsh`); `dsh.service` active.
+
+### Box state audit
+
+- `ss -tlnp`: `LISTEN 127.0.0.1:4100` (loopback only; no firewall change).
+- `ls -l /run/take-a-number/`: `srwxrwxrwx tan tan tan.sock` (world-connectable, per v0.1.2), dir tan-owned.
+- `stat /var/lib/take-a-number/audit`: `750 tan:tan`.
+- `tan status`: `take-a-number 0.1.4 — up … — active 0 / waiting 0`, queues `strix-apu [0/3]`, `r9700-egpu [0/1]`.
+
+### End-to-end transcript (2026-11-15 22:01–22:03 UTC, daemon 0.1.2)
+
+1. CLI (user `t3code`) holds the eGPU slot: `tan acquire --model medium-dense --kind interactive-chat --desc "e2e hold 120s" --hold-ms 120000` → `r9700-egpu [1/1]`.
+2. Production dsh (web profile, user `dsh`, via Caddy-routed browser) sends a turn on `medium-dense` ("Queue test: what is 2+2?…"). Daemon shows the production process queued behind the CLI hold — **global FIFO across processes/users**:
+   ```
+   r9700-egpu  [1/1]
+     ● tan-cli/cli#727278@local-ai-machine  medium-dense  interactive-chat  1m52s  “e2e hold 120s”
+     … dsh/web#722561@local-ai-machine  medium-dense  call  pos 1  waiting 4.0s  “call · turn 1”
+     … dsh/web#722561@local-ai-machine  medium-dense  call  pos 2  waiting 4.0s  “call · turn 1 · “Queue test: what is 2+2?””
+   ```
+3. Audit (daemon 0.1.3+ denormalizes the identity onto every lease line):
+   ```
+   22:01:11 granted   r9700-egpu  “e2e hold 120s”
+   22:02:59 queued    r9700-egpu  “call · turn 1”
+   22:02:59 queued    r9700-egpu  “call · turn 1 · “Queue test: what is 2+2?””
+   22:03:11 released  r9700-egpu  “e2e hold 120s”   ran 120076ms
+   22:03:11 granted   r9700-egpu  “call · turn 1”
+   22:03:11 granted   r9700-egpu  “call · turn 1 · “Queue test: what is 2+2?””
+   22:03:11 released  r9700-egpu  “call · turn 1”
+   22:03:11 released  r9700-egpu  “call · turn 1 · “Queue test: what is 2+2?””
+   ```
+   Strict FIFO: the two dsh calls were admitted in queue order the instant the hold expired.
+4. Crash-release: an earlier holder killed by a tool timeout produced `identity_down` → `released` in the same second.
+5. Restart resilience: daemon restarted 22:05 / 22:15 / 22:21 — the dsh client re-registered within ~14 s each time (audit `identity_up` 22:15:19 after the 22:15:05 restart); no dsh-side intervention.
+6. Final sanity on 0.1.4: `granted`/`released` with `harness/instance/pid` and `ran 60030ms` for a 60 s CLI hold.
+
+### model-capacity is gone
+
+- dsh-deploy `cordis.patch.yml`: model-capacity row removed, take-a-number row active (`enabled: true`, queues apu→`strix-apu`, eGPU→`r9700-egpu`).
+- The live Activity panel is the take-a-number one (daemon-fed); the dsh/web identity registers with the daemon and its calls are gated.
+
+### Rollback
+
+- Re-pin dsh-deploy to the previous SHA (`8aff251…`) in `/etc/dsh-deploy-pin` (local-ai-machine commit + `deploy.sh`) then `sudo systemctl start dsh-deploy-update` — restores the prior plugin set.
+- `take-a-number` units + tan user: a normal local-ai-machine revert; the daemon is standalone and its removal does not affect dsh (the plugin fail-opens).
+
+### Deviations from the plan
+
+1. **Lab dsh (e2e step 4) not run** — no lab profile is provisioned on the box. The cross-process global FIFO was proven with two independent processes/users instead (CLI as `t3code`, production dsh as `dsh`).
+2. **Composer dock banner** — the daemon-side queue state was fully proven (status/audit above); the in-composer dock banner was not observed in the a11y snapshot while the turn was queued (the turn showed dsh's own "Deep diving" indicator). Dock rendering remains a follow-up.
+3. **Two extra daemon releases during T3** — v0.1.3 (audit identity denormalization) and v0.1.4 (anonymous stream subscriptions, fixing the ~25 s panel stream identity churn) were cut from live findings; the plugin/dsh-deploy/pin chain was re-shipped for each.
+4. **Daemon ExecStart** uses `${pkgs.nodejs_22}/bin/node` (equivalent to the planned `/run/current-system/sw/bin/node`, without profile indirection).
+5. **Socket mode 0777** (plan said 0666): a socket needs the execute bit to be connectable; 0777 is the correct world-connectable mode.
