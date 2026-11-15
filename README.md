@@ -102,15 +102,47 @@ const result = await withLease(
 );
 ```
 
+## Running as a container
+
+```sh
+docker run --rm -it \
+  -p 127.0.0.1:4100:4100 \
+  -v /run/take-a-number:/run/take-a-number \
+  -v /var/lib/take-a-number/audit:/var/lib/take-a-number/audit \
+  -v /etc/take-a-number/config.json:/etc/take-a-number/config.json \
+  ghcr.io/chrisjohnson/take-a-number:v0.2.0
+```
+
+The daemon's defaults are the container's contract: UDS at
+`/run/take-a-number/tan.sock`, TCP (protocol + HTTP + dashboard) on
+`127.0.0.1:4100`, config at `/etc/take-a-number/config.json`, audit JSONL under
+`/var/lib/take-a-number/audit`. The container binds loopback inside itself, so
+publish the port to the host loopback (`127.0.0.1:HOSTPORT:4100`) and front it
+with your own reverse proxy for external access.
+
+- Run the container as the uid that owns the mounted socket/audit dirs (the
+  image defaults to the `node` user; set `user:` to your own uid:gid).
+- `TAN_AUTH_TOKEN` (env or `--auth-token`): when set, every `/api/*` route
+  requires `?token=…` — open the dashboard as `http://host:4100/?token=…` and
+  the page carries the token on all API calls. Unset = open (local dev).
+- A stale UDS file from a previous run is unlinked on start and on shutdown, so
+  container restarts are clean.
+
+Images are built by CI from version tags (`vX.Y.Z` → `ghcr.io/chrisjohnson/take-a-number:vX.Y.Z`,
+plus `:latest`).
+
 ## Deployment on local-ai-machine
 
-The daemon runs as system user `tan` (systemd `take-a-number`), config at
-`/etc/take-a-number/config.json`, audit at `/var/lib/take-a-number/audit`, dashboard at
-`http://127.0.0.1:4100/`. The queue config maps live LiteLLM model names to GPU queues
-(`strix-apu` = APU, `r9700-egpu` = eGPU); the seed comes from `modelctl list` + LiteLLM
-`/model/info`. The dsh harness gates via the `dsh-take-a-number` plugin
-(`chrisjohnson/dsh-plugins` → `packages/take-a-number`), pinned in `dsh-deploy`.
-See `tickets/` for the deploy plan and `PLAN.md` for the full architecture reference.
+The box runs the daemon as a compose container in `chrisjohnson/local-ai-machine`
+(`docker/docker-compose.yml`, image pinned there), as system user `tan`, with the
+queue config at `/etc/take-a-number/config.json`, audit at
+`/var/lib/take-a-number/audit`, and the dashboard behind Caddy at
+`https://tan.local-ai-machine.johnsonlab.dev` (token-gated). The queue config maps
+live LiteLLM model names to GPU queues (`strix-apu` = APU, `r9700-egpu` = eGPU);
+the seed comes from `modelctl list` + LiteLLM `/model/info`. The dsh harness gates
+via the `dsh-take-a-number` plugin (`chrisjohnson/dsh-plugins` →
+`packages/take-a-number`), pinned in `dsh-deploy`. See `tickets/` for the deploy
+plan and `PLAN.md` for the full architecture reference.
 
 ## Files
 
@@ -118,8 +150,9 @@ See `tickets/` for the deploy plan and `PLAN.md` for the full architecture refer
 | -------------------- | ----------------------------------------------------------- |
 | `daemon/lib/queues.js` | pure queue/lease/identity state machine (no I/O)           |
 | `daemon/lib/protocol.js` | connection protocol, long-polls, event feed               |
+| `daemon/lib/http.js`   | HTTP surface: dashboard + JSON API, optional token auth   |
 | `daemon/lib/audit.js`  | append-only JSONL audit, 14-day retention                   |
-| `daemon/main.js`       | entrypoint: UDS + TCP/HTTP + dashboard                      |
+| `daemon/main.js`       | entrypoint: UDS + TCP (protocol/HTTP routing), lifecycle  |
 | `client/index.mjs`     | TanClient, withLease (zero deps)                            |
 | `bin/tan`              | CLI                                                         |
 | `dashboard/`           | index.html, style.css, app.js (zero deps)                   |

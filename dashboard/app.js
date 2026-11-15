@@ -4,6 +4,21 @@
   'use strict';
 
   var BASE = (window.TAN_BASE || '').replace(/\/+$/, '');
+  // Optional daemon auth: the page is opened as /?token=… ; remember the token
+  // and carry it on every API call. With no token (open daemon) this is a no-op.
+  var TOKEN = (function () {
+    try {
+      var fromUrl = new URLSearchParams(window.location.search).get('token');
+      if (fromUrl) {
+        try { sessionStorage.setItem('tan-token', fromUrl); } catch (e) { /* private mode */ }
+        return fromUrl;
+      }
+      return sessionStorage.getItem('tan-token') || '';
+    } catch (e) { return ''; }
+  })();
+  function authed(path) {
+    return TOKEN ? path + (path.indexOf('?') === -1 ? '?' : '&') + 'token=' + encodeURIComponent(TOKEN) : path;
+  }
   var STALL_MS = 20000;
   var FALLBACK_POLL_MS = 2000;
   var GHOST_TTL_MS = 900;
@@ -378,7 +393,7 @@
   }
 
   function pollOnce() {
-    fetch(BASE + '/api/status').then(function (res) {
+    fetch(authed(BASE + '/api/status')).then(function (res) {
       if (!res.ok) throw new Error('http ' + res.status);
       return res.json();
     }).then(function (frame) {
@@ -397,7 +412,7 @@
     controllers.add(controller);
     setStatus('poll');
     armStall();
-    fetch(BASE + '/api/events', { signal: controller.signal }).then(function (res) {
+    fetch(authed(BASE + '/api/events'), { signal: controller.signal }).then(function (res) {
       if (!res.ok || !res.body) throw new Error('stream unavailable');
       var reader = res.body.getReader();
       var decoder = new TextDecoder();
@@ -454,9 +469,9 @@
     var id = button.dataset.id;
     if (action === 'force') {
       if (!window.confirm('Force-release this lease? The underlying model call may still be running; this can exceed the queue limit.')) return;
-      fetch(BASE + '/api/force-release', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ leaseId: id }) }).catch(function () {});
+      fetch(authed(BASE + '/api/force-release'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ leaseId: id }) }).catch(function () {});
     } else if (action === 'cancel') {
-      fetch(BASE + '/api/cancel', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ waiterId: id }) }).catch(function () {});
+      fetch(authed(BASE + '/api/cancel'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ waiterId: id }) }).catch(function () {});
     }
   });
 
@@ -503,7 +518,7 @@
       unmapped: document.getElementById('mc-unmapped').value,
       queueLimit: Number(document.getElementById('mc-queue-limit').value) || 1000,
     };
-    fetch(BASE + '/api/set-limits', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) })
+    fetch(authed(BASE + '/api/set-limits'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) })
       .then(function (res) { return res.json(); })
       .then(function () { modal.hidden = true; })
       .catch(function () {});
