@@ -1,0 +1,172 @@
+#!/usr/bin/env node
+// tan — take-a-number command line. status, acquire, tail, force-release, version.
+
+import { TanClient } from '../client/index.mjs';
+
+const argv = process.argv.slice(2);
+const command = argv[0] ?? 'help';
+const flags = {};
+for (let i = 1; i < argv.length; i += 1) {
+  const arg = argv[i];
+  if (arg.startsWith('--')) {
+    const key = arg.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+    const next = argv[i + 1];
+    if (next === undefined || next.startsWith('--')) {
+      flags[key] = true;
+    } else {
+      flags[key] = next;
+      i += 1;
+    }
+  }
+}
+
+const SOCK = process.env.TAN_SOCK ?? '/run/take-a-number/tan.sock';
+const TCP = process.env.TAN_TCP ?? '127.0.0.1:4100';
+
+function fail(message) {
+  process.stderr.write(`tan: ${message}\n`);
+  process.exit(1);
+}
+
+function client() {
+  return new TanClient({ sock: SOCK, tcp: TCP, harness: 'tan-cli', instance: 'cli' });
+}
+
+function fmtDuration(ms) {
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  const m = Math.floor(ms / 60000);
+  return `${m}m${Math.round((ms % 60000) / 1000)}s`;
+}
+
+async function cmdStatus() {
+  const tan = client();
+  await tan.connect();
+  const status = await tan.status();
+  tan.close();
+  if (status === null) fail('daemon unreachable');
+  const { uptimeMs, version, totals, queues, identities } = status;
+  process.stdout.write(`take-a-number ${version} — up ${fmtDuration(uptimeMs)} — active ${totals.active} / waiting ${totals.waiting}\n`);
+  for (const queue of queues) {
+    const cap = queue.unlimited ? '∞' : `${queue.used}/${queue.limit}`;
+    process.stdout.write(`\n${queue.id}  [${cap}]\n`);
+    for (const lease of queue.active) {
+      process.stdout.write(`  ● ${lease.identity}  ${lease.model ?? '?'}  ${lease.kind}  ${fmtDuration(lease.elapsedMs)}${lease.description ? `  “${lease.description}”` : ''}\n`);
+    }
+    for (const waiter of queue.waiters) {
+      process.stdout.write(`  … ${waiter.identity}  ${waiter.model ?? '?'}  ${waiter.kind}  pos ${waiter.position}  waiting ${fmtDuration(waiter.waitedMs)}${waiter.description ? `  “${waiter.description}”` : ''}\n`);
+    }
+  }
+  process.stdout.write(`\nidentities: ${identities.map((i) => `${i.identity} (pid ${i.pid})`).join(', ') || 'none'}\n`);
+}
+
+async function cmdAcquire() {
+  const model = flags.model;
+  if (!model) fail('acquire needs --model');
+  const tan = client();
+  await tan.connect();
+  const result = await tan.acquire({
+    model,
+    provider: typeof flags.provider === 'string' ? flags.provider : undefined,
+    kind: typeof flags.kind === 'string' ? flags.kind : 'call',
+    description: typeof flags.desc === 'string' ? flags.desc : undefined,
+    session: typeof flags.session === 'string' ? flags.session : undefined,
+    sessionTitle: typeof flags.sessionTitle === 'string' ? flags.sessionTitle : undefined,
+    turn: Number.isInteger(Number(flags.turn)) ? Number(flags.turn) : undefined,
+    modality: typeof flags.modality === 'string' ? flags.modality : undefined,
+  });
+  if (result.status === 'degraded') {
+    process.stdout.write('degraded (daemon unreachable) — pass-through, no lease\n');
+    tan.close();
+    process.exit(0);
+  }
+  if (result.status === 'queued') {
+    process.stdout.write(`queued on ${result.queue}, position ${result.position} — waiting\n`);
+  }
+  let leaseId = result.leaseId;
+  while (leaseId === undefined) {
+    const w = await tan.waitFor({ waiterId: result.waiterId });
+    if (w.status === 'granted') {
+      leaseId = w.leaseId;
+    } else if (w.status === 'degraded') {
+      process.stdout.write('daemon went away while waiting — pass-through\n');
+      tan.close();
+      process.exit(0);
+    } else if (w.status === 'cancelled') {
+      fail('cancelled while waiting');
+    } else {
+      process.stdout.write(`still queued, position ${w.position}\n`);
+    }
+  }
+  process.stdout.write(`granted: lease ${leaseId} on ${result.queue ?? 'unlimited'}\n`);
+  const holdMs = Number(flags.holdMs) || 0;
+  if (holdMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, holdMs));
+    tan.release(leaseId);
+    process.stdout.write(`released after ${holdMs}ms\n`);
+  } else {
+    tan.release(leaseId);
+    process.stdout.write('released (no --hold-ms given)\n');
+  }
+  tan.close();
+}
+
+async function cmdTail() {
+  const limit = Number(flags.limit) || 50;
+  const res = await fetch(`http://${TCP}/api/audit?limit=${limit}`);
+  if (!res.ok) fail(`audit HTTP ${res.status}`);
+  const { lines } = await res.json();
+  for (const line of lines) {
+    const at = new Date(line.at).toISOString().slice(11, 19);
+    const bits = [at, line.event];
+    if (line.identity) bits.push(line.identity);
+    if (line.queue) bits.push(line.queue);
+    if (line.model) bits.push(line.model);
+    if (line.kind && line.event !== 'register') bits.push(line.kind);
+    if (line.position) bits.push(`pos ${line.position}`);
+    if (line.waitedMs !== undefined) bits.push(`waited ${line.waitedMs}ms`);
+    if (line.runMs !== undefined) bits.push(`ran ${line.runMs}ms`);
+    if (line.description) bits.push(`“${line.description}”`);
+    process.stdout.write(bits.join('  ') + '\n');
+  }
+}
+
+async function cmdForceRelease() {
+  const leaseId = argv[1];
+  if (!leaseId) fail('force-release needs a lease id');
+  const tan = client();
+  await tan.connect();
+  const res = await tan.forceRelease(leaseId);
+  tan.close();
+  process.stdout.write(res.released ? `released ${leaseId}\n` : `no such lease ${leaseId}\n`);
+}
+
+switch (command) {
+  case 'status':
+    await cmdStatus();
+    break;
+  case 'acquire':
+    await cmdAcquire();
+    break;
+  case 'tail':
+    await cmdTail();
+    break;
+  case 'force-release':
+    await cmdForceRelease();
+    break;
+  case 'version':
+    process.stdout.write(`${(await import('../client/index.mjs')).VERSION}\n`);
+    break;
+  default:
+    process.stdout.write(`tan — take-a-number CLI
+
+usage:
+  tan status                     live queues, leases, waiters, identities
+  tan acquire --model M          take a lease (add --kind, --desc, --session, --turn,
+                                 --modality, --provider, --hold-ms N)
+  tan tail [--limit N]           recent audit events
+  tan force-release LEASE_ID     ops: force free a stuck lease
+  tan version
+`);
+    process.exit(command === 'help' ? 0 : 2);
+}

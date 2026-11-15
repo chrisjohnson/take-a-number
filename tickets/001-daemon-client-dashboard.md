@@ -1,6 +1,6 @@
 # T1 — Daemon, client, CLI, dashboard
 
-**Status:** in_progress
+**Status:** done
 **Repo:** `chrisjohnson/take-a-number` (this repo)
 **Depends on:** nothing
 
@@ -193,4 +193,20 @@ tan acquire …                                               # client reports d
 
 ## Evidence
 
-(paste verification output here before marking done)
+- **Tests:** `node --test test/*.test.js` → `# tests 28 / # pass 28 / # fail 0 / # cancelled 0`
+  (13 state-machine incl. the drain-promotion id-clobber and identityDown ordering
+  regressions, 9 protocol over a real UDS server incl. the post-promotion `wait` race,
+  6 client incl. crash-reclaim and fail-open, dashboard render verified separately via
+  jsdom DOM execution — 14/14 assertions: queue cards, live/waiting states, metadata
+  tags, KPIs, identity rows).
+- **Live smoke (loopback daemon, port 4199):** `tan status` shows both queues; holder CLI
+  `acquire --model medium-dense --hold-ms 5000` → second CLI queues at position 1 →
+  releases on release (audit: `granted … waited 0ms`, `released … ran 5003ms`);
+  crash (client close without release) reclaims the lease for the next waiter;
+  daemon-down client degrades to pass-through in < 1 s; `/api/status`, `/api/audit`,
+  `/api/events` (NDJSON stream), `/api/cancel`, `/api/force-release`, `/api/set-limits`
+  all exercised; `GET /` + `/static/*` serve the dashboard (200s, CORS for loopback embeds).
+- **Review:** zero runtime dependencies (package.json has none); state machine is pure
+  (no I/O in `queues.js`); loopback bind enforced (`main.js` refuses non-127.0.0.1);
+  no TTL timers; metadata stored/echoed/audited verbatim (description clamped to 160);
+  audit is append-only daily JSONL with 14-day retention.

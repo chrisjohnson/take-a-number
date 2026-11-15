@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>take-a-number</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='1.5' y='9' width='3' height='5.5' rx='1' fill='%233b82f6' opacity='.5'/%3E%3Crect x='6.5' y='5.5' width='3' height='9' rx='1' fill='%233b82f6' opacity='.7'/%3E%3Crect x='11.5' y='2' width='3' height='12.5' rx='1' fill='%233b82f6' opacity='.9'/%3E%3C/svg%3E">
+</head>
+<body class="mc-root">
+<div class="mc-page">
+  <div class="mc-pagehead">
+    <div class="mc-pagehead-main">
+      <h1 class="mc-title">take-a-number</h1>
+      <div class="mc-page-sub" id="mc-sub">model-call queue · one FIFO per GPU</div>
+    </div>
+    <div class="mc-page-actions">
+      <button class="mc-btn" id="mc-limits-btn" type="button">Limits</button>
+      <span class="mc-status" id="mc-status"><i></i><span id="mc-status-text">connecting</span></span>
+    </div>
+  </div>
+  <div class="mc-kpis" id="mc-kpis"></div>
+  <div class="mc-provider-grid" id="mc-queues"></div>
+  <div class="mc-section" id="mc-identities-section" hidden>
+    <div class="mc-section-head">Identities <span class="mc-count" id="mc-identities-count">0</span></div>
+    <div id="mc-identities"></div>
+  </div>
+</div>
+<div class="mc-modal-backdrop" id="mc-modal" hidden>
+  <div class="mc-modal" role="dialog" aria-modal="true" aria-labelledby="mc-modal-title">
+    <div class="mc-modal-head">
+      <div>
+        <h2 class="mc-modal-title" id="mc-modal-title">Queue limits</h2>
+        <div class="mc-modal-sub">Changes apply immediately and persist to the daemon config.</div>
+      </div>
+      <button class="mc-btn" id="mc-modal-close" type="button">✕</button>
+    </div>
+    <div id="mc-limit-rows"></div>
+    <div class="mc-modal-grid">
+      <label>Unmapped models
+        <select id="mc-unmapped" class="mc-input">
+          <option value="unlimited">unlimited (pass through)</option>
+          <option value="reject">reject</option>
+        </select>
+      </label>
+      <label>Queue bound (waiters per queue)
+        <input class="mc-input" id="mc-queue-limit" type="number" min="1" step="1">
+      </label>
+    </div>
+    <div class="mc-modal-foot">
+      <button class="mc-btn" id="mc-modal-cancel" type="button">Cancel</button>
+      <button class="mc-btn primary" id="mc-modal-apply" type="button">Apply</button>
+    </div>
+  </div>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>
