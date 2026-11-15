@@ -186,6 +186,7 @@ export class Queues {
       leaseId: id,
       queue: queueId,
       identityId: lease.identityId,
+      ...this.#idFields(lease.identityId),
       model: lease.model ?? null,
       kind: lease.kind ?? 'call',
       description: lease.description ?? null,
@@ -225,7 +226,7 @@ export class Queues {
     const queueId = this.queueFor(base.model, provider);
     if (queueId === null) {
       if (this.unmapped === 'reject') {
-        this.onEvent('rejected', { ...base, reason: 'unmapped' });
+        this.onEvent('rejected', { ...base, ...this.#idFields(identityId), reason: 'unmapped' });
         throw new TanError('UNMAPPED_REJECTED', `model "${base.model}" is not mapped to any queue`, { model: base.model });
       }
       // Unmapped model: a synthetic unlimited lease. Tracked (so release and
@@ -253,7 +254,7 @@ export class Queues {
       return { status: 'granted', lease, queue: queueId };
     }
     if (bucket.waiters.length >= this.queueLimit) {
-      this.onEvent('rejected', { ...base, queue: queueId, reason: 'queue_full', waiting: bucket.waiters.length });
+      this.onEvent('rejected', { ...base, ...this.#idFields(identityId), queue: queueId, reason: 'queue_full', waiting: bucket.waiters.length });
       throw new TanError('QUEUE_FULL', `queue "${queueId}" is full (${bucket.waiters.length} waiting)`, { queue: queueId, limit: bucket.limit, waiting: bucket.waiters.length });
     }
     const waiter = {
@@ -270,6 +271,7 @@ export class Queues {
       waiterId: waiter.id,
       queue: queueId,
       identityId: waiter.identityId,
+      ...this.#idFields(waiter.identityId),
       model: waiter.model,
       kind: waiter.kind,
       description: waiter.description,
@@ -286,6 +288,7 @@ export class Queues {
     return {
       leaseId: lease.id,
       identityId: lease.identityId,
+      ...this.#idFields(lease.identityId),
       model: lease.model,
       kind: lease.kind,
       description: lease.description,
@@ -295,6 +298,13 @@ export class Queues {
       modality: lease.modality,
       meta: lease.meta,
     };
+  }
+
+  // Denormalize the identity onto lease/waiter audit events so the log answers
+  // "who" without a join against the identity_up lines.
+  #idFields(identityId) {
+    const info = this.identities.get(identityId);
+    return info ? { harness: info.harness, instance: info.instance, pid: info.pid, host: info.host, user: info.user } : {};
   }
 
   /**
@@ -321,6 +331,7 @@ export class Queues {
       waiterId,
       queue: waiter.queue,
       identityId: waiter.identityId,
+      ...this.#idFields(waiter.identityId),
       model: waiter.model,
       kind: waiter.kind,
       description: waiter.description,
@@ -353,6 +364,7 @@ export class Queues {
         leaseId,
         queue: lease.queue,
         identityId: lease.identityId,
+        ...this.#idFields(lease.identityId),
         model: lease.model,
         kind: lease.kind,
         description: lease.description,

@@ -9,7 +9,7 @@ import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { hostname, userInfo } from 'node:os';
 
-export const VERSION = '0.1.2';
+export const VERSION = '0.1.3';
 
 export class TanError extends Error {
   constructor(code, message) {

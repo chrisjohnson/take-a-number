@@ -257,3 +257,19 @@ test('audit file captures the session', async () => {
   assert.match(raw, /"event":"released"/);
   assert.match(raw, /"event":"connection_closed"/);
 });
+
+test('lease audit events carry the identity, not just its id', async () => {
+  const a = await registered();
+  const { leaseId } = await a.request('acquire', { model: 'small-dense' });
+  await a.request('release', { leaseId });
+  a.raw.destroy();
+  const files = (await import('node:fs')).readdirSync(join(dir, 'audit')).filter((f) => f.endsWith('.jsonl'));
+  const lines = (await import('node:fs')).readFileSync(join(dir, 'audit', files.at(-1)), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  for (const event of ['granted', 'released']) {
+    const line = lines.find((l) => l.event === event && l.identityId === a.identityId);
+    assert.ok(line, `audit has ${event} for this identity`);
+    assert.equal(line.identityId, a.identityId);
+    assert.equal(line.harness, 'test');
+    assert.ok(line.pid !== undefined, `${event} carries the identity pid`);
+  }
+});
