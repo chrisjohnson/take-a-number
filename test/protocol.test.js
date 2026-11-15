@@ -244,6 +244,29 @@ test('events stream pushes status frames on activity', async () => {
   a.raw.destroy();
 });
 
+test('events subscription may open anonymously (no identity churn)', async () => {
+  const fs = await import('node:fs');
+  const auditFile = () => join(dir, 'audit', fs.readdirSync(join(dir, 'audit')).filter((f) => f.endsWith('.jsonl')).at(-1));
+  const countIdentityUps = () => fs.readFileSync(auditFile(), 'utf8').split('\n').filter((l) => l.includes('"event":"identity_up"')).length;
+  const before = countIdentityUps();
+  const sub = await openSocket();
+  let streaming = false;
+  sub.on('data', (chunk) => {
+    for (const line of chunk.toString('utf8').split('\n')) {
+      if (line === '') continue;
+      if (JSON.parse(line).streaming === true) streaming = true;
+    }
+  });
+  sub.write(JSON.stringify({ id: 'anon1', type: 'events' }) + '\n');
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('streaming ack timeout')), 2000);
+    const check = () => streaming && (clearTimeout(timer), resolve());
+    sub.on('data', check);
+  });
+  sub.destroy();
+  assert.equal(countIdentityUps(), before, 'anonymous subscription takes no identity');
+});
+
 test('audit file captures the session', async () => {
   const a = await registered();
   await a.request('acquire', { model: 'small-dense' });

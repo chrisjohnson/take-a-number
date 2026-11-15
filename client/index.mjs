@@ -9,7 +9,7 @@ import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { hostname, userInfo } from 'node:os';
 
-export const VERSION = '0.1.3';
+export const VERSION = '0.1.4';
 
 export class TanError extends Error {
   constructor(code, message) {
@@ -326,7 +326,9 @@ export class TanClient {
     this.eventSub = dedicated;
     let buffer = '';
     dedicated.on('connect', () => {
-      dedicated.write(JSON.stringify({ id: randomUUID(), type: 'register', ...this.identity }) + '\n');
+      // Anonymous subscription: no register, so the daemon takes no identity
+      // for the stream and its periodic re-subscription is audit-quiet.
+      dedicated.write(JSON.stringify({ id: randomUUID(), type: 'events' }) + '\n');
       dedicated.write(JSON.stringify({ id: randomUUID(), type: 'events' }) + '\n');
     });
     dedicated.on('data', (chunk) => {

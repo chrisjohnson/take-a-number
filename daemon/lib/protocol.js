@@ -159,7 +159,10 @@ export function handleConnection(socket, deps, initialData) {
     if (typeof id !== 'string' || id === '' || typeof type !== 'string') {
       return fail(id ?? null, 'BAD_FRAME', 'frame needs string id and type');
     }
-    if (!registered && type !== 'register') {
+    // An events subscription may open a connection anonymously: subscribers
+    // hold no leases, so they take no identity (and no identity_up/_down audit
+    // churn) — panels re-subscribe their stream periodically.
+    if (!registered && type !== 'register' && type !== 'events') {
       fail(id, 'NOT_REGISTERED', 'the first request on a connection must be register');
       socket.destroy();
       return;
