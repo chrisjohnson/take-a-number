@@ -93,6 +93,23 @@ test('withLease gates end-to-end and runs the work under the lease', async () =>
   });
 });
 
+test('aborting while queued cancels the waiter and rejects', async () => {
+  await withClients(['a', 'b'], async ({ a, b }) => {
+    const lease = await a.acquire({ model: 'small-dense' });
+    const controller = new AbortController();
+    const pending = withLease(b, { model: 'small-dense', kind: 'call' }, () => 'should not run', { signal: controller.signal });
+    await new Promise((resolve) => setTimeout(resolve, 100)); // b is queued now
+    controller.abort();
+    await assert.rejects(pending, (error) => error.code === 'ABORTED');
+    // a's lease is intact; b left no waiter behind
+    const status = await a.status();
+    const gpuA = status.queues.find((q) => q.id === 'gpu-a');
+    assert.equal(gpuA.active.length, 1);
+    assert.equal(gpuA.waiters.length, 0);
+    a.release(lease.leaseId);
+  });
+});
+
 test('crash (close) reclaims the lease for the next waiter', async () => {
   const a = client('a');
   const b = client('b');

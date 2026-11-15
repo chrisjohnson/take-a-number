@@ -371,9 +371,15 @@ export class TanClient {
 /**
  * Convenience: gate one model call end-to-end (acquire → wait → run → release).
  * `fn(leaseId | null)` — null means degraded pass-through.
+ *
+ * `{ signal }` — aborting while queued cancels the waiter and rejects with an
+ * AbortError; aborting while running is up to `fn` (the stream does it).
+ * `{ onWait(info) }` — called on queue entry and each long-poll tick with
+ * `{ waiterId, queue, position }`.
  */
-export async function withLease(tan, fields, fn, { onWait = () => {} } = {}) {
+export async function withLease(tan, fields, fn, { signal, onWait = () => {} } = {}) {
   const result = await tan.acquire(fields);
+  if (signal?.aborted) throw new TanError('ABORTED', 'aborted before acquiring');
   if (result.status === 'degraded') return fn(null);
   if (result.status === 'granted') {
     try {
@@ -382,20 +388,45 @@ export async function withLease(tan, fields, fn, { onWait = () => {} } = {}) {
       tan.release(result.leaseId);
     }
   }
-  onWait({ queue: result.queue, position: result.position });
+  onWait({ waiterId: result.waiterId, queue: result.queue, position: result.position });
   let granted = null;
   for (;;) {
-    const w = await tan.waitFor({ waiterId: result.waiterId });
+    if (signal?.aborted) {
+      tan.cancel(result.waiterId);
+      throw new TanError('ABORTED', 'aborted while queued');
+    }
+    let w;
+    if (signal) {
+      try {
+        w = await Promise.race([
+          tan.waitFor({ waiterId: result.waiterId }),
+          new Promise((_, reject) => {
+            signal.addEventListener('abort', () => reject(new TanError('ABORTED', 'aborted while queued')), { once: true });
+          }),
+        ]);
+      } catch (error) {
+        if (error instanceof TanError && error.code === 'ABORTED') {
+          tan.cancel(result.waiterId);
+          throw error;
+        }
+        throw error;
+      }
+    } else {
+      w = await tan.waitFor({ waiterId: result.waiterId });
+    }
     if (w.status === 'granted') {
       granted = w.leaseId;
       break;
     }
     if (w.status === 'degraded') return fn(null);
     if (w.status === 'cancelled') {
-      const error = new TanError('CANCELLED', 'waiter was cancelled');
-      throw error;
+      throw new TanError('CANCELLED', 'waiter was cancelled');
     }
-    onWait({ queue: result.queue, position: w.position });
+    onWait({ waiterId: result.waiterId, queue: result.queue, position: w.position });
+  }
+  if (signal?.aborted) {
+    tan.release(granted);
+    throw new TanError('ABORTED', 'aborted at grant');
   }
   try {
     return await fn(granted);
