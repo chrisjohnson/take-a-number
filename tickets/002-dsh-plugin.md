@@ -1,6 +1,6 @@
 # T2 — `dsh-take-a-number` plugin in dsh-plugins
 
-**Status:** pending
+**Status:** done (2026-11-15; tag `dsh-take-a-number-v0.1.0`, commit `c3363db`)
 **Repo:** `chrisjohnson/dsh-plugins` (new package `packages/take-a-number`)
 **Depends on:** T1 done (client API + daemon protocol stable)
 
@@ -122,4 +122,45 @@ tan tail --limit 20                # register + queued + granted + released for 
 
 ## Evidence
 
-(paste verification output here before marking done)
+```
+$ node --test packages/take-a-number/test/*.test.mjs
+# tests 16
+# pass 16
+# fail 0
+
+$ npm run check        # verify.mjs + check-plugin-hooks.mjs + full suite
+verify: 0 error(s), 0 warning(s) across 14 package(s)
+# tests 1544  # pass 1533  # fail 0  # skipped 11
+
+$ DSH_BIN=.../@deepseek-ai/dsh@0.2..2-rc.1 node scripts/compose-smoke.mjs
+ok    dsh-take-a-number  (imports, not skipped, layer + 1 row(s), profile wiring)
+compose-smoke: 14/14 package(s) composed
+```
+
+Released: `chrisjohnson/dsh-plugins` commit `c3363db` (direct push to main), tag
+`dsh-take-a-number-v0.1.0` pushed. Install spec:
+`git+https://github.com/chrisjohnson/dsh-plugins.git#dsh-take-a-number-v0.1.0&path:/packages/take-a-number`.
+
+### Deviations from the work instructions (deliberate)
+
+1. **Purpose discovery (step 3):** dsh 0.2.2-rc.1 passes **no** `purpose` (or sibling
+   intent field) to `llm/stream` — verified against the installed 0.2.2-rc.1. Every call
+   arrives undistinguished, so `KIND_MAP` exists as the seam and all acquires today are
+   `kind: "call"`. Observed behavior recorded in the package README ("Kind mapping").
+2. **`src/gate-client.mjs` (step 4):** not a separate file. `host.mjs` imports
+   `take-a-number/client` (`TanClient` + `withLease`) and **injects** `withLease` into
+   `gate.mjs`, which therefore imports nothing outside the package — the repo test rule
+   is "no install", so the gate's tests (pass-through, metadata, degraded, rejection,
+   describe-failure) run on a bare clone against an injected fake. The dependency is
+   pinned to `take-a-number#v0.1.1` (not v0.1.0): v0.1.1 added the `withLease`
+   signal/abort support the gate relies on.
+3. **Config key `url` → `tcp`** (`TAN_TCP` env): same meaning (loopback TCP fallback),
+   clearer name; validated loopback-only like the ticket requires.
+4. **Omitted from the model-capacity port:** local rate metering (`#tap`, tok/s) and the
+   per-turn `conversation.chat.turnTail` wait card. The daemon is the source of truth for
+   per-call state and the panel is box-wide; the composer dock carries the per-session
+   queued state (position, elapsed, cancel). Neither omitted surface was in deliverables
+   1–8; both are follow-up candidates.
+5. **Lab pass (Verification, "Lab" section):** deferred to T3 — those steps explicitly
+   require the LIVE daemon ("it is up after T3's deploy"), which does not exist until
+   T3's NixOS deploy lands. T3's ticket carries the lab + cross-check verification.
