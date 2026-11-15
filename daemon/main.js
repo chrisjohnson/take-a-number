@@ -6,7 +6,7 @@
 // POST /api/set-limits.
 
 import { createServer } from 'node:net';
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { hostname, userInfo } from 'node:os';
@@ -17,7 +17,7 @@ import { EventFeed, handleConnection, connectEvents } from './lib/protocol.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const VERSION = '0.1.0';
+const VERSION = '0.1.2';
 
 function parseArgs(argv) {
   const args = {
@@ -301,9 +301,14 @@ tcpServer.listen(port, host, () => {
 });
 udsServer.listen(args.sock, () => {
   try {
-    writeFileSync(args.sock, String(process.pid));
+    // 0777, not the umask default: the queue is a machine-wide service and
+    // every local user's harness (dsh, opencode, the CLI) must be able to
+    // connect. Node creates the socket srwxr-xr-x, which makes connect()
+    // EACCES for everyone but tan — the daemon is the only authority here
+    // (per-connection identity, loopback box), so world-connect is the point.
+    chmodSync(args.sock, 0o777);
   } catch {
-    // the socket file is enough
+    // a mode failure is surfaced by clients as degraded, not fatal
   }
   process.stderr.write(`take-a-number ${VERSION}: UDS protocol on ${args.sock}\n`);
 });

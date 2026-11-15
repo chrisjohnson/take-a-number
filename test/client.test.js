@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -159,4 +159,48 @@ test('events subscription receives status frames on activity', async () => {
       unsubscribe();
     }
   });
+});
+
+test('a UDS we may not connect to (EACCES) falls back to TCP', async () => {
+  // The daemon chmods its socket 0777, but a client that cannot write the
+  // socket file (a different user, a tightened mode) must not loop on the
+  // UDS forever — it must fall back to the TCP endpoint. A socket with no
+  // write bit denies connect() even for its owner.
+  const deniedSock = join(dir, 'denied.sock');
+  const uds = createServer(() => {});
+  await new Promise((resolve) => uds.listen(deniedSock, resolve));
+  chmodSync(deniedSock, 0o555);
+
+  const tcp = createServer((socket) => {
+    let buffered = '';
+    socket.on('data', (chunk) => {
+      buffered += chunk.toString('utf8');
+      let index;
+      while ((index = buffered.indexOf('\n')) !== -1) {
+        const line = buffered.slice(0, index);
+        buffered = buffered.slice(index + 1);
+        if (line === '') continue;
+        const msg = JSON.parse(line);
+        if (msg.type === 'register') {
+          socket.write(JSON.stringify({ id: msg.id, ok: true, identityId: 'test-identity' }) + '\n');
+        } else if (msg.type === 'status') {
+          socket.write(JSON.stringify({ id: msg.id, ok: true, version: 'test', uptimeMs: 1, totals: { active: 0, waiting: 0 }, queues: [], identities: [] }) + '\n');
+        }
+      }
+    });
+  });
+  const port = await new Promise((resolve) => tcp.listen(0, '127.0.0.1', () => resolve(tcp.address().port)));
+
+  const c = new TanClient({ sock: deniedSock, tcp: `127.0.0.1:${port}`, harness: 'test', instance: 'e2e', degradedAfterMs: 200 });
+  try {
+    await c.connect();
+    const status = await c.status();
+    assert.equal(status.version, 'test');
+    assert.equal(c.transport.kind, 'tcp');
+  } finally {
+    c.close();
+    tcp.close();
+    uds.close();
+    rmSync(deniedSock, { force: true });
+  }
 });

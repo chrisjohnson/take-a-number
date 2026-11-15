@@ -1,6 +1,6 @@
 {
   "name": "take-a-number",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Global model-call queue and lease service: one FIFO queue per GPU, per-process identity leases, audit trail, dashboard.",
   "type": "module",
   "license": "MIT",

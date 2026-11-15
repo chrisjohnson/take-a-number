@@ -9,7 +9,7 @@ import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { hostname, userInfo } from 'node:os';
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.1.2';
 
 export class TanError extends Error {
   constructor(code, message) {
@@ -56,6 +56,7 @@ export class TanClient {
     this.reconnectTimer = null;
     this.degradedTimer = null;
     this.degraded = false;
+    this.udsDenied = false; // a UDS connect we may not be allowed to make (EACCES)
     this.listeners = new Map(); // event -> Set<fn>
     this.eventSub = null; // socket used for events streaming
     this.eventCb = null;
@@ -114,7 +115,10 @@ export class TanClient {
 
   #connect() {
     if (this.closing || this.socket !== null) return;
-    const useUds = existsSync(this.sock);
+    // A socket file we cannot write to (EACCES) is not "daemon down" — it is
+    // "use the TCP fallback". Remember the denial so every subsequent
+    // reconnect goes straight to TCP instead of burning a backoff cycle.
+    const useUds = existsSync(this.sock) && !this.udsDenied;
     let socket;
     try {
       if (useUds) {
@@ -183,6 +187,9 @@ export class TanClient {
     socket.on('close', onDeath);
     socket.on('error', (error) => {
       if (!connectedOnce) {
+        if (this.transport.kind === 'uds' && (error?.code === 'EACCES' || error?.code === 'EPERM')) {
+          this.udsDenied = true;
+        }
         // connect failed; schedule retry
         socket.destroy();
       } else {
@@ -196,9 +203,12 @@ export class TanClient {
     if (this.socket !== null || this.closing) return;
     this.#connect();
     // Give the first attempt a moment; do not block the caller forever.
+    // Deliberately NOT unref'd: in a short-lived process (the CLI) this timer
+    // is the only ref'd handle while the first connect is failing over, and an
+    // unref'd timer lets the event loop drain and the process exit with the
+    // caller's await still pending.
     await new Promise((resolve) => {
       const timer = setTimeout(resolve, 1500);
-      if (typeof timer.unref === 'function') timer.unref();
       this.on('registered', () => {
         clearTimeout(timer);
         resolve();
