@@ -303,9 +303,11 @@ export class TanClient {
     }
   }
 
-  release(leaseId) {
+  release(leaseId, reason) {
     if (leaseId === null || leaseId === undefined) return;
-    this.#send({ type: 'release', leaseId }).catch(() => {});
+    // Optional reason (e.g. the proxy's "watchdog") rides the release so the
+    // daemon audits it; omitted keeps the daemon's default "released".
+    this.#send({ type: 'release', leaseId, ...(typeof reason === 'string' && reason !== '' ? { reason } : {}) }).catch(() => {});
   }
 
   cancel(waiterId) {

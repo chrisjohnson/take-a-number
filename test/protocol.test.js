@@ -2,7 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
 import { connect } from 'node:net';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -264,6 +264,23 @@ test('force-release frees a held lease', async () => {
   assert.equal(res.released, true);
   const status = await a.request('status');
   assert.equal(status.totals.active, 0);
+  a.raw.destroy();
+});
+
+test('release honors an optional reason (audited verbatim)', async () => {
+  const a = await registered();
+  const lease = await a.request('acquire', { model: 'small-dense' });
+  const res = await a.request('release', { leaseId: lease.leaseId, reason: 'watchdog' });
+  assert.equal(res.released, true);
+  // The audit records the reason verbatim (the proxy's watchdog path).
+  const lines = [];
+  for (const name of readdirSync(join(dir, 'audit'))) {
+    if (!name.endsWith('.jsonl')) continue;
+    for (const raw of readFileSync(join(dir, 'audit', name), 'utf8').split('\n')) {
+      if (raw !== '') lines.push(JSON.parse(raw));
+    }
+  }
+  assert.ok(lines.some((l) => l.event === 'released' && l.reason === 'watchdog'));
   a.raw.destroy();
 });
 

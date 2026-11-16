@@ -717,22 +717,31 @@ consumed by the plugins.
 
 ## 13. Phase 2 (after rollout, each independently shippable)
 
+> The living, elaborated version of this backlog — with status, trade-offs, and
+> the reasoning behind each item — is [`docs/roadmap.md`](docs/roadmap.md). This
+> list is the concise index; keep the two in sync.
+
 1. **Dashboard polish pass** (§5.4 Phase 2) — the pretty/visual/interactive treatment: identity
    table, audit explorer, interactive operations, history charts, dark theme.
 2. **Prometheus `/metrics`** on the daemon (queue depth, active leases, wait-time histogram,
    per-identity call counts) + scrape target + Grafana dashboard JSON in local-ai-machine
    (Grafana stays for long-history/remote viewing; the in-daemon dashboard is the live box view).
+   **Done** (ticket 006).
 3. **Model→queue auto-discovery** from the `strix-halo-r9700-llm-builds` catalog on `SIGHUP`
    (replaces manual re-seeding on role swaps).
 4. **LAN mode:** bind 0.0.0.0:4100 behind a shared token (secret in `/etc/nixos/secrets`,
    referenced by path) for a second machine's harnesses; Caddy route optional. Measured LAN RTT
    (§3.1) says this is performance-fine.
 5. **Per-identity weights / priorities** in the FIFO (audit data already supports the policy).
-6. **Evidence-based lease watchdog** (no stream chunks for 5 min ⇒ force-release + audit flag).
+6. **Evidence-based lease watchdog** (no response bytes for 15 min ⇒ kill the upstream leg +
+   release the lease with the auditable reason `watchdog`). **In progress.**
 7. **`tan` CLI adoption by scripts** (bench orchestrator preflight, modelctl) — extends
    serialization to batch workloads.
 8. **opencode Desktop panel** (`gui-experimental`) — likely collapses into embedding/ linking the
    server dashboard once it lands; keep only if a native in-app view proves wanted.
+
+The Caddy `models.*` route → proxy follow-up (queueing mandatory for the hostname) is already
+shipped; see `docs/roadmap.md`.
 
 ---
 

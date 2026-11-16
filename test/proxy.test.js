@@ -2,7 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
 import http from 'node:http';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -115,6 +115,23 @@ async function viaProxy({ body, headers = {}, method = 'POST', path = '/v1/chat/
 }
 
 const gpuA = (snap) => snap.queues.find((q) => q.id === 'gpu-a');
+
+// Read every audit event the in-process daemon has recorded (JSONL, per day).
+function readAuditLines() {
+  const lines = [];
+  for (const name of readdirSync(audit.dir)) {
+    if (!name.endsWith('.jsonl')) continue;
+    for (const raw of readFileSync(join(audit.dir, name), 'utf8').split('\n')) {
+      if (raw.trim() === '') continue;
+      try {
+        lines.push(JSON.parse(raw));
+      } catch {
+        // never a partial line in this test
+      }
+    }
+  }
+  return lines;
+}
 
 test('healthz is 200 and never queued', async () => {
   const res = await fetch(`http://127.0.0.1:${proxyPort}/healthz`);
@@ -245,6 +262,55 @@ test('aborting a queued non-compliant request cancels its waiter and frees the q
   holder.release(hold.leaseId);
   const settled = await p;
   assert.ok(settled instanceof Error); // the aborted fetch rejected
+});
+
+test('watchdog: a response silent for stallMs is killed and the lease released as "watchdog"', async () => {
+  // A dedicated upstream that writes one byte, then goes silent forever — a
+  // hung generation. The main shared upstream always ends, so it can't do this.
+  const stallUpstream = http.createServer((req, res) => {
+    req.resume(); // drain the request body
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write('data: start\n\n');
+    // then silence — never res.end()
+  });
+  await new Promise((r) => stallUpstream.listen(0, '127.0.0.1', r));
+  const stallPort = stallUpstream.address().port;
+
+  // A second proxy with a short stall threshold, sharing the same daemon.
+  const stallProxy = await startProxy({
+    upstream: `127.0.0.1:${stallPort}`,
+    listen: '127.0.0.1:0',
+    sock: sockPath,
+    tcp: '127.0.0.1:1',
+    instance: 'stall-proxy',
+    stallMs: 400,
+  });
+  const stallProxyPort = stallProxy.server.address().port;
+
+  try {
+    // Hard-queue a request (no x-tan-client). The proxy takes the single gpu-a
+    // slot, forwards, receives the first byte, then silence.
+    const p = fetch(`http://127.0.0.1:${stallProxyPort}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'small-dense', messages: [] }),
+    }).then((r) => r.text()).catch(() => 'aborted');
+    // Let it forward and go silent, then let the watchdog fire.
+    await new Promise((r) => setTimeout(r, 1500));
+    // The slot is free again: the watchdog released the hung lease.
+    assert.equal(gpuA(await holder.status()).used, 0);
+    const body = await p;
+    // The client saw the first byte, then the connection was cut cleanly.
+    assert.ok(body.includes('data: start'));
+    // The audit records the release with the distinct watchdog reason.
+    assert.ok(
+      readAuditLines().some((l) => l.event === 'released' && l.reason === 'watchdog'),
+      'audit contains a watchdog release',
+    );
+  } finally {
+    await stallProxy.close();
+    stallUpstream.close();
+  }
 });
 
 test('fail-open: with the daemon down the proxy forwards without queueing', async () => {

@@ -1,6 +1,6 @@
 {
   "name": "take-a-number",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Global model-call queue and lease service: one FIFO queue per GPU, per-process identity leases, an admission proxy in front of litellm, audit trail, dashboard.",
   "type": "module",
   "license": "MIT",

@@ -263,9 +263,11 @@ export function handleConnection(socket, deps, initialData) {
           return;
         }
         case 'release': {
-          const { leaseId } = msg;
+          const { leaseId, reason } = msg;
           if (typeof leaseId !== 'string') return fail(id, 'BAD_REQUEST', 'release needs a leaseId');
-          const released = queues.release(leaseId);
+          // Optional reason (e.g. the proxy's "watchdog" for a hung generation);
+          // absent keeps the default "released".
+          const released = queues.release(leaseId, typeof reason === 'string' && reason !== '' ? reason : 'released');
           return respond(id, true, { released });
         }
         case 'cancel': {

@@ -15,6 +15,12 @@ import { TanClient } from '../client/index.mjs';
 import { createAdmitter } from './lib/admit.js';
 
 const BODY_CAP = 64 * 1024 * 1024;
+// A held lease whose response produces no bytes for this long is a hung
+// generation (wedged worker, client stuck mid-stream). The proxy kills the
+// upstream leg and releases the lease with reason "watchdog". 15 minutes of
+// silence is far beyond any cold start, so a legitimate slow generation is
+// never touched; the threshold is "no bytes", not "total duration".
+const STALL_MS = 15 * 60 * 1000;
 // Hop-by-hop headers never cross a proxy (RFC 7230 §6.1) plus host/content-length,
 // which the proxy recomputes for the upstream leg.
 const STRIP = new Set([
@@ -31,6 +37,7 @@ function parseArgs(argv) {
     sock: '/run/take-a-number/tan.sock',
     tcp: '127.0.0.1:4100',
     instance: 'tan-proxy',
+    stallMs: STALL_MS,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const key = argv[i];
@@ -40,6 +47,11 @@ function parseArgs(argv) {
     else if (key === '--sock') { args.sock = value; i += 1; }
     else if (key === '--tcp') { args.tcp = value; i += 1; }
     else if (key === '--instance') { args.instance = value; i += 1; }
+    else if (key === '--stall-ms') {
+      const ms = Number(value);
+      args.stallMs = Number.isFinite(ms) && ms >= 0 ? ms : STALL_MS;
+      i += 1;
+    }
   }
   return args;
 }
@@ -91,20 +103,49 @@ function extractModel(body) {
 }
 
 // Pipe one request to the upstream and the response back, unmodified. Resolves
-// (and calls onSettled exactly once) when the response finishes, the client
-// goes away, or the upstream errors. Never throws.
-function forward(req, res, body, upstream, { signal, onSettled }) {
+// (and calls onSettled exactly once with { stalled }) when the response
+// finishes, the client goes away, the upstream errors, or the watchdog fires.
+// Never throws.
+//
+// `stallMs` (0 = off): a resettable silence timer on the response bytes. If no
+// byte arrives for `stallMs`, the generation is declared hung: the upstream leg
+// is destroyed (frees the GPU) and the settle is flagged `stalled`, so the
+// caller can release the lease with a distinct, auditable reason.
+function forward(req, res, body, upstream, { signal, onSettled, stallMs = 0 } = {}) {
   return new Promise((resolve) => {
     let settled = false;
+    let stalled = false;
+    let stallTimer = null;
+    const clearStall = () => {
+      if (stallTimer !== null) {
+        clearTimeout(stallTimer);
+        stallTimer = null;
+      }
+    };
     const settle = () => {
       if (settled) return;
       settled = true;
+      clearStall();
       try {
-        onSettled?.();
+        onSettled?.({ stalled });
       } catch {
         // caller problem, not a forwarding problem
       }
       resolve();
+    };
+    const armStall = () => {
+      if (stallMs <= 0) return;
+      clearStall();
+      stallTimer = setTimeout(() => {
+        stallTimer = null;
+        stalled = true;
+        upstreamReq.destroy();
+        // Cut the client's response cleanly: deliver the bytes seen so far,
+        // then end, so the caller doesn't hang on a dead stream.
+        if (res.headersSent && !res.writableEnded) res.end();
+        settle();
+      }, stallMs);
+      if (typeof stallTimer.unref === 'function') stallTimer.unref();
     };
     if (signal?.aborted) {
       settle();
@@ -115,6 +156,7 @@ function forward(req, res, body, upstream, { signal, onSettled }) {
       (upstreamRes) => {
         res.writeHead(upstreamRes.statusCode ?? 502, stripHeaders(upstreamRes.headers));
         upstreamRes.pipe(res);
+        upstreamRes.on('data', armStall);
         upstreamRes.on('end', settle);
         upstreamRes.on('close', settle);
       },
@@ -128,6 +170,7 @@ function forward(req, res, body, upstream, { signal, onSettled }) {
     });
     if (signal) signal.addEventListener('abort', () => { upstreamReq.destroy(); settle(); }, { once: true });
     res.on('close', () => { upstreamReq.destroy(); settle(); });
+    armStall();
     upstreamReq.end(body);
   });
 }
@@ -138,7 +181,7 @@ function health(res, { degraded, startedAt }) {
 }
 
 export async function startProxy({
-  upstream, listen, sock, tcp, instance,
+  upstream, listen, sock, tcp, instance, stallMs = STALL_MS,
   client = new TanClient({ sock, tcp, harness: 'tan-proxy', instance, degradedAfterMs: 500 }),
 } = {}) {
   const up = splitHostPort(upstream, 4000);
@@ -177,7 +220,12 @@ export async function startProxy({
       const leaseId = decision.leaseId;
       await forward(req, res, body, { ...up, agent }, {
         signal: controller.signal,
-        onSettled: () => { if (leaseId) client.release(leaseId); },
+        stallMs,
+        onSettled: ({ stalled }) => {
+          // A watchdog kill releases with its own reason so the audit can tell
+          // a hung-generation abort from a normal settle.
+          if (leaseId) client.release(leaseId, stalled ? 'watchdog' : undefined);
+        },
       });
     } catch (error) {
       if (error?.code === 'ABORTED') return; // client went away; nothing left to send

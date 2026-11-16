@@ -63,7 +63,7 @@ cancelled, immediately. No TTL timers: a crashed process cannot hold a slot.
 | `register`     | `{ identityId }` — first message on a connection; carries `capability` (`static` default \| `dynamic`) |
 | `acquire`      | `{ status: 'granted', leaseId, queue, claimToken? }` / `{ status: 'queued', waiterId, queue, position }` / `{ status: 'unlimited' }` |
 | `wait`         | long-poll ≤ 25 s: `{ status: 'granted', leaseId, queue, waitedMs, claimToken? }` / `{ status: 'still-queued', position }` / `{ status: 'cancelled' }` |
-| `release`      | `{ released }` (idempotent — a second release is a no-op)               |
+| `release`      | `{ released }` (idempotent — a second release is a no-op); optional `reason` string is audited verbatim (default `released`; the proxy sends `watchdog` for a hung generation) |
 | `checkout`     | `{ leaseId, queue }` / `{ leaseId: null }` — admit a request by (model, instance[, token]) |
 | `cancel`       | `{ cancelled }` (one waiter)                                            |
 | `force-release`| `{ released }` (ops)                                                    |
@@ -175,15 +175,27 @@ Behavior:
   stay up even if the queue brain is down.
 - **Abort** — a client that goes away while queued cancels its waiter and frees the line;
   while forwarding, the upstream leg is destroyed and the lease released.
+- **Watchdog** — a held lease whose response produces **no bytes for 15 min** is a hung
+  generation (wedged worker, client stuck mid-stream). The proxy kills the upstream leg
+  (frees the GPU), ends the client's response cleanly, and releases the lease with the
+  auditable reason `watchdog`. The threshold is *no-bytes*, not *total-duration*, so a long
+  generation is never touched; tune it with `--stall-ms` (0 disables).
 - **`/healthz`** — 200 for healthchecks, never queued.
 
 `release` is idempotent, so split release-ownership is safe: the proxy releases when the
 forwarded request settles and a compliant client may also release its own lease — whichever
 fires second is a no-op.
 
-In the end-state the proxy fronts litellm's public port (Caddy points at the proxy), making
-queueing mandatory for all external traffic. Until then it runs on its own port and clients
-opt in by pointing there.
+On local-ai-machine the proxy fronts the `models.*` Caddy hostname, so queueing is mandatory
+for that traffic; loopback harnesses (dsh, opencode, the CLI) point at it directly.
+
+### Proxy latency
+
+The proxy adds one local daemon round-trip per request (admission) plus the HTTP hop.
+`test/proxy-perf.test.js` benchmarks a tight sequential inference loop (direct vs. the
+compliant reserve→checkout→release flow vs. the hard queue) on every `node --test` and asserts
+the compliant overhead stays under a generous bound, so a regression is caught as it lands.
+On this box the measured overhead is **~0.4 ms per call** — negligible next to a model call.
 
 ## Metrics (Prometheus)
 
