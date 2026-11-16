@@ -21,6 +21,18 @@ export class TanError extends Error {
 
 const BACKOFF_MS = [250, 500, 1000, 2000, 4000, 8000, 16000, 30000];
 
+// Derive a display username from os.userInfo(), tolerating containers that run
+// as a numeric uid with no /etc/passwd entry: uv_os_get_passwd then returns
+// ENOENT and userInfo() THROWS (it does not return undefined). Fall back to
+// 'unknown' rather than crashing client construction.
+export function deriveUser(getUserInfo) {
+  try {
+    return (typeof getUserInfo === 'function' && getUserInfo().username) || 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
 export class TanClient {
   /**
    * @param {object} opts
@@ -36,13 +48,13 @@ export class TanClient {
     tcp = '127.0.0.1:4100',
     harness,
     instance = 'default',
-    user = (typeof userInfo === 'function' && userInfo().username) || 'unknown',
+    user,
     degradedAfterMs = 300,
   } = {}) {
     if (!harness) throw new TanError('BAD_CONFIG', 'TanClient needs a harness');
     this.sock = sock;
     this.tcp = tcp;
-    this.identity = { harness, instance, pid: process.pid, host: hostname(), user, version: VERSION };
+    this.identity = { harness, instance, pid: process.pid, host: hostname(), user: user ?? deriveUser(userInfo), version: VERSION };
     this.degradedAfterMs = degradedAfterMs;
 
     this.socket = null;

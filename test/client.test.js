@@ -8,7 +8,21 @@ import { join } from 'node:path';
 import { Queues } from '../daemon/lib/queues.js';
 import { Audit } from '../daemon/lib/audit.js';
 import { EventFeed, handleConnection, connectEvents } from '../daemon/lib/protocol.js';
-import { TanClient, withLease } from '../client/index.mjs';
+import { TanClient, withLease, deriveUser } from '../client/index.mjs';
+
+test('deriveUser: returns the username when userInfo() works', () => {
+  assert.equal(deriveUser(() => ({ username: 'tan' })), 'tan');
+});
+
+test('deriveUser: falls back to unknown when userInfo() throws (no passwd entry)', () => {
+  const enoent = () => { const e = new Error('uv_os_get_passwd ENOENT'); e.code = 'ENOENT'; throw e; };
+  assert.equal(deriveUser(enoent), 'unknown');
+});
+
+test('deriveUser: falls back to unknown when no userInfo fn or empty username', () => {
+  assert.equal(deriveUser(undefined), 'unknown');
+  assert.equal(deriveUser(() => ({ username: '' })), 'unknown');
+});
 
 const dir = mkdtempSync(join(tmpdir(), 'tan-client-'));
 const sockPath = join(dir, 'tan.sock');
