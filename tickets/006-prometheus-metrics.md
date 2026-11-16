@@ -1,6 +1,9 @@
 # T6 — Prometheus /metrics on the daemon + Grafana dashboard
 
-**Status:** not started
+**Status:** in progress — daemon + box config deployed and verified; **pending the
+user's image swap** (TAN_TAG bump + `compose up -d`, outside the agent's docker
+scope). After that, the Prometheus target flips `up` and the Grafana panels get
+data.
 **Repos:** `chrisjohnson/take-a-number` (daemon `/metrics`), `chrisjohnson/local-ai-machine`
 (prometheus scrape job, Grafana dashboard JSON, knowledge note)
 **Depends on:** T1–T5 live (daemon on `127.0.0.1:4100`; the box already runs Prometheus
@@ -96,14 +99,86 @@ zero-dependency: the Prometheus text exposition format is trivial to render by h
 
 ## Evidence
 
-_(to be filled as work completes)_
+### Daemon `/metrics` (live, v0.6.0)
+
+Rendered by hand (zero deps). Empty-state scrape of a fresh daemon:
+
+```
+# HELP tan_up The take-a-number daemon is up.
+# TYPE tan_up gauge
+tan_up{version="0.4.0"} 1
+tan_uptime_seconds 0.986
+tan_identities 0
+tan_queue_depth{queue="r9700-egpu"} 0
+tan_queue_depth{queue="strix-apu"} 0
+tan_queue_limit{queue="r9700-egpu"} 1
+tan_queue_limit{queue="strix-apu"} 3
+tan_queue_active{queue="strix-apu"} 0
+...
+# TYPE tan_grants_total counter
+# TYPE tan_wait_seconds histogram
+# TYPE tan_run_seconds histogram
+```
+
+Under real traffic (two static clients on a limit-1 queue — one granted, one
+queued, then released):
+
+```
+tan_identity_ups_total 2
+tan_grants_total{queue="strix-apu",identity="smoke-a"} 1
+tan_grants_total{queue="strix-apu",identity="smoke-b"} 1
+tan_releases_total{queue="strix-apu",reason="identity_down"} 2
+tan_wait_seconds_bucket{queue="strix-apu",le="0.5"} 1
+tan_wait_seconds_bucket{queue="strix-apu",le="1"} 1
+tan_wait_seconds_bucket{queue="strix-apu",le="+Inf"} 2
+tan_wait_seconds_sum{queue="strix-apu"} 1.507
+tan_wait_seconds_count{queue="strix-apu"} 2
+tan_run_seconds_sum{queue="strix-apu"} 1.508
+tan_run_seconds_count{queue="strix-apu"} 2
+```
+
+Counters, histograms, and identity gauges all populate correctly; a crashed
+client's leases are released via `identity_down` (the reason label is right).
+
+### Tests
+
+`node --test test/*.test.js plugins/opencode/test/*.test.js` → **107 pass / 0
+fail** (7 new `metrics.test.js` renderer cases + 2 `/metrics` HTTP e2e cases).
+
+### Box deployment (local-ai-machine `a36de22`, via `deploy.sh`)
+
+- `deploy.sh` ended `VERIFY OK`; the box checkout now carries the new
+  `prometheus.yml` and `grafana/dashboards/take-a-number.json`.
+- `prometheus` restarted to load the new job. The `take-a-number` target is
+  registered and currently `down` with `HTTP 404` — **expected**: the box is
+  still on the pre-v0.6.0 image (`TAN_TAG` pin), which has no `/metrics`. It
+  flips `up` the moment the image is swapped (below).
+- Grafana file-provisioner picked up the new dashboard JSON (30 s refresh); no
+  provisioning errors in the container log.
+
+### Pending user step (outside the agent's docker scope — no `up`/`run`)
+
+On the box, in the `docker/` checkout:
+
+```sh
+# 1. point the pin at v0.6.0
+sed -i 's/^TAN_TAG=.*/TAN_TAG=c037a4117aa3ff8228748e5d238fd93cb8769da9/' .env
+# 2. pull + recreate the daemon and proxy
+docker compose pull take-a-number tan-proxy
+docker compose up -d take-a-number tan-proxy
+```
+
+Then confirm: `curl -s 127.0.0.1:4100/metrics | head` and the Prometheus
+target shows `up`, and the Grafana dashboard `take-a-number — model-call queue`
+has live panels.
 
 ## Review checklist
 
-- [ ] Zero runtime dependencies; exposition rendered by hand.
-- [ ] `Queues` state machine unchanged (metrics observe, never gate).
-- [ ] Counters/histograms from the event stream; gauges from `snapshot()` at scrape time.
-- [ ] `/metrics` loopback-only, token-exempt like the dashboard shell.
-- [ ] Unit + e2e tests green; full suite green.
-- [ ] Prometheus target `up`; Grafana dashboard renders live panels.
-- [ ] Deployed through git only (take-a-number main + local-ai-machine `deploy.sh`).
+- [x] Zero runtime dependencies; exposition rendered by hand.
+- [x] `Queues` state machine unchanged (metrics observe, never gate).
+- [x] Counters/histograms from the event stream; gauges from `snapshot()` at scrape time.
+- [x] `/metrics` loopback-only, token-exempt like the dashboard shell.
+- [x] Unit + e2e tests green; full suite green (107 pass).
+- [ ] Prometheus target `up`; Grafana dashboard renders live panels — **pending the
+      image swap above** (target is registered and `down`/404 on the old image, as expected).
+- [x] Deployed through git only (take-a-number main + local-ai-machine `deploy.sh`).
