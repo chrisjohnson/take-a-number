@@ -1,6 +1,6 @@
 {
   "name": "take-a-number",
-  "version": "0.4.1",
+  "version": "0.5.1",
   "description": "Global model-call queue and lease service: one FIFO queue per GPU, per-process identity leases, an admission proxy in front of litellm, audit trail, dashboard.",
   "type": "module",
   "license": "MIT",
@@ -11,7 +11,8 @@
   "exports": {
     ".": "./client/index.mjs",
     "./client": "./client/index.mjs",
-    "./proxy/admit": "./proxy/lib/admit.js"
+    "./proxy/admit": "./proxy/lib/admit.js",
+    "./server": "./plugins/opencode/index.mjs"
   },
   "bin": {
     "tan": "bin/tan"
@@ -21,7 +22,8 @@
     "daemon",
     "proxy",
     "dashboard",
-    "bin"
+    "bin",
+    "plugins"
   ],
   "scripts": {
     "test": "node --test test/*.test.js",
