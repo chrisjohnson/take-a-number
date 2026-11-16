@@ -36,19 +36,25 @@ cannot put a per-call value into dsh's outgoing HTTP request.
 
 What dsh *does* allow is a **static** `headers` map in the provider config
 (`dsh-llm-pi-ai/lib/index.js` `headers: z.dict(z.string())`, spread into every wire request).
-So the compliant marker is a **per-instance identity token**, set once in dsh's provider config as
-a static `x-tan-client: <token>` header, and per-call correlation is done **in the daemon** by
-`(model, clientToken) → lease checkout`. The token is a light per-instance secret: it
-disambiguates multiple dsh instances and prevents a non-compliant client from piggybacking on a
-compliant client's held lease (a rogue curl can't forge a token it doesn't have).
+So the compliant marker is a **static** `x-tan-client: <instance-name>` header set once in dsh's
+provider config, and per-call correlation is done **in the daemon** by `(model, instance) → lease
+checkout`.
+
+**Self-identification, not a secret** (Chris's direction: no secret keys; litellm is the API-key
+enforcement layer). The marker is the client's *instance name* — the same name it already
+registers with the daemon (`web`, `lab-<name>`), which is already stamped on every lease via its
+identity. No new config, no token. The tradeoff: a non-compliant client can *claim* an instance
+name to skip the line once per held lease (a fairness skew, visible in the audit) — accepted,
+because the queue is an admission/fairness mechanism, not a security boundary.
 
 ## Protocol additions (daemon)
 
-1. `acquire` accepts an optional `clientToken` (string). It is stored on the resulting lease
-   (`lease.clientToken`) so the proxy can correlate. Purely additive; existing clients unaffected.
-2. New op **`checkout { model, clientToken }`** → `{ leaseId } | { leaseId: null }`.
-   - Finds the oldest lease in `active` with `lease.model === model` && `lease.clientToken ===
-     clientToken` && `!lease.checkedOut` && `lease.queue !== null`.
+1. No `acquire` change: the lease is already stamped with its identity, which carries the
+   `instance` name the client registered with. The proxy correlates on that.
+2. New op **`checkout { model, instance }`** → `{ leaseId } | { leaseId: null }`.
+   - Finds the oldest lease in `active` with `lease.model === model` &&
+     `identities.get(lease.identityId).instance === instance` && `!lease.checkedOut` &&
+     `lease.queue !== null`.
    - Marks it `lease.checkedOut = true` (one request per lease) and returns its id.
    - Returns `null` when there is no matching held lease (client sent a request without a
      reservation, or it was already claimed) — the proxy then falls back to hard queueing.
@@ -67,11 +73,11 @@ node proxy/main.js --upstream 127.0.0.1:4000 --listen 127.0.0.1:4140 \
 Per request:
 1. Buffer the request body (cap ~64 MB); parse `model` from the JSON (chat/completions shape).
    Unparseable / no model → treat as unmapped.
-2. **Compliant path** — request carries `x-tan-client: <token>` and the model is mapped:
-   - `checkout { model, clientToken }`.
+2. **Compliant path** — request carries `x-tan-client: <instance-name>` and the model is mapped:
+   - `checkout { model, instance }`.
      - `leaseId` returned → forward the request as-is; on response finish/abort
        `release(leaseId, 'proxy_forwarded')`.
-     - `null` → no held lease → fall through to the hard path.
+     - `null` → no held lease under that name → fall through to the hard path.
 3. **Hard path** (non-compliant, or compliant-without-lease): `acquire { model, identityId:
    <proxy> }` (real lease for a mapped model, unlimited lease for unmapped). If `queued`, long-poll
    `wait` until grant, honoring client abort → `cancel` the waiter and destroy the socket. On
@@ -116,15 +122,16 @@ Ownership/liveness edges:
 
 ## Deliverables
 
-1. **take-a-number**: daemon `clientToken` on `acquire` + `checkout` op + tests; `proxy/main.js`
+1. **take-a-number**: daemon `checkout { model, instance }` op + tests; `proxy/main.js`
    + a thorough e2e test suite (compliant pass-through, hard queue behind a hold, abort-while-
    queued, unmapped forward, fail-open, SSE pipe, health, body integrity, idempotent release);
    repo polished for publication (README proxy section, package.json, tidy). Release `v0.3.0` + image.
-2. **dsh-plugins** `take-a-number`: plugin carries a per-instance `clientToken` (config), passes
-   it to `acquire`, and relies on proxy release (idempotent) instead of assuming sole ownership.
-   Release `v0.1.3`.
-3. **dsh-deploy**: bump the plugin pin; add the static `x-tan-client` header to dsh's litellm
-   provider config; point dsh's litellm base URL at the proxy port.
+2. **dsh-plugins** `take-a-number`: **no code change** — the plugin already self-identifies via
+   its registered instance name, which the proxy's `checkout` keys on. Release `v0.1.3` is a
+   dependency bump to `take-a-number` v0.3.0 only.
+3. **dsh-deploy**: bump the plugin pin; add the static `x-tan-client: <instance-name>` header
+   (self-identity, not a secret) to dsh's litellm provider config; point dsh's litellm base URL
+   at the proxy port.
 4. **local-ai-machine**: `tan-proxy` compose service on `4140` (option port); deploy.
 5. **Proofs**: compliant flow (dsh turn on big-moe queued behind a CLI hold, then granted +
    released); non-compliant flow (raw curl to the proxy hard-queued behind the same hold);

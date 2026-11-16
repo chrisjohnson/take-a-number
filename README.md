@@ -64,7 +64,7 @@ cancelled, immediately. No TTL timers: a crashed process cannot hold a slot.
 | `acquire`      | `{ status: 'granted', leaseId, queue }` / `{ status: 'queued', waiterId, queue, position }` / `{ status: 'unlimited' }` |
 | `wait`         | long-poll ≤ 25 s: `{ status: 'granted', leaseId, queue, waitedMs }` / `{ status: 'still-queued', position }` / `{ status: 'cancelled' }` |
 | `release`      | `{ released }` (idempotent — a second release is a no-op)               |
-| `checkout`     | `{ leaseId, queue }` / `{ leaseId: null }` — claim a held lease by (model, clientToken) |
+| `checkout`     | `{ leaseId, queue }` / `{ leaseId: null }` — claim a held lease by (model, instance) |
 | `cancel`       | `{ cancelled }` (one waiter)                                            |
 | `force-release`| `{ released }` (ops)                                                    |
 | `status`       | full snapshot: queues, active leases, waiters, identities, history60    |
@@ -75,9 +75,7 @@ cancelled, immediately. No TTL timers: a crashed process cannot hold a slot.
 `interactive-chat`, `set-title`, `compaction`, `subagent`, `judge`, `generate`,
 `image-gen`, `call`), `description` (≤ 160 chars, e.g. `interactive-chat · turn 7 · "Fix
 the deploy script"`), `session`, `sessionTitle`, `turn`, `modality`
-(`text`/`image`/`embedding`/`other`), `meta` (free-form object), and `clientToken`
-(a per-instance token a compliant client stamps on its reservation so the admission
-proxy can claim the matching lease via `checkout`).
+(`text`/`image`/`embedding`/`other`), `meta` (free-form object).
 
 **Fail-open:** when the daemon is unreachable, `acquire` degrades to an un-gated
 pass-through after ~300 ms instead of blocking. Harnesses keep working; the queue is an
@@ -156,10 +154,13 @@ Behavior:
 
 - **Model selection** — the `model` field of the (buffered, ≤ 64 MB) JSON body selects the
   queue, using the daemon's own model→queue map. Unparseable/absent model = unmapped.
-- **Compliant** — `x-tan-client` + mapped model → `checkout { model, clientToken }`. A claim
-  forwards on the held lease; a miss falls back to hard queueing. The token is a light
-  per-instance secret: it disambiguates multiple instances and stops a non-compliant client
-  from piggybacking on someone else's held lease.
+- **Compliant** — `x-tan-client: <instance-name>` + mapped model →
+  `checkout { model, instance }`. The header carries the client's **self-identity** — the
+  same instance name it registered with the daemon (`web`, `lab-foo`, …) — not a secret. A
+  claim forwards on that instance's held lease; a miss falls back to hard queueing. Because
+  it is self-identification, a non-compliant client can at best *claim* an instance name to
+  skip the line once per held lease (a fairness skew, visible in the audit) — not a security
+  hole, since litellm remains the API-key enforcement layer.
 - **Hard / unmapped** — `acquire` (real lease for a mapped model, unlimited lease for
   unmapped), long-poll until grant, forward, release on settle.
 - **Fail-open** — daemon unreachable → forward without queueing (logged). The box's models

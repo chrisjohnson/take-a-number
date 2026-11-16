@@ -42,7 +42,7 @@ const signal = () => new AbortController().signal;
 test('compliant checkout hit claims the held lease and skips acquire', async () => {
   const client = fakeClient({ checkout: () => ({ leaseId: 'L-held', queue: 'q' }) });
   const admit = createAdmitter({ client });
-  const decision = await admit({ model: 'small-dense', clientToken: 'tok' });
+  const decision = await admit({ model: 'small-dense', instance: 'web' });
   assert.equal(decision.leaseId, 'L-held');
   assert.equal(decision.source, 'checkout');
   assert.equal(client.calls.acquire.length, 0);
@@ -52,12 +52,12 @@ test('compliant checkout hit claims the held lease and skips acquire', async () 
 test('compliant checkout miss falls through to the hard path', async () => {
   const client = fakeClient({ checkout: () => ({ leaseId: null, queue: null }) });
   const admit = createAdmitter({ client });
-  const decision = await admit({ model: 'small-dense', clientToken: 'tok' });
+  const decision = await admit({ model: 'small-dense', instance: 'web' });
   assert.equal(decision.source, 'granted');
   assert.equal(client.calls.acquire.length, 1);
 });
 
-test('no clientToken goes straight to the hard path (no checkout)', async () => {
+test('no instance name goes straight to the hard path (no checkout)', async () => {
   const client = fakeClient();
   const admit = createAdmitter({ client });
   const decision = await admit({ model: 'small-dense' });

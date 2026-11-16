@@ -196,58 +196,70 @@ test('rejected acquire is audited', () => {
   assert.ok(events.some((e) => e.type === 'rejected' && e.reason === 'queue_full'));
 });
 
-test('checkout claims the matching held lease by (model, clientToken), once', () => {
+test('checkout claims the matching held lease by (model, instance), once', () => {
   const { queues } = make();
-  const held = queues.acquire({ identityId: 'dsh-1', model: 'small-dense', clientToken: 'tok-A' });
+  queues.registerIdentity('dsh-1', { harness: 'dsh', instance: 'web' });
+  const held = queues.acquire({ identityId: 'dsh-1', model: 'small-dense' });
   assert.equal(held.status, 'granted');
 
-  const claim = queues.checkout({ model: 'small-dense', clientToken: 'tok-A' });
+  const claim = queues.checkout({ model: 'small-dense', instance: 'web' });
   assert.equal(claim.leaseId, held.lease.id);
   assert.equal(claim.queue, 'gpu-a');
 
   // A second claim for the same lease misses (one checkout per lease).
-  assert.equal(queues.checkout({ model: 'small-dense', clientToken: 'tok-A' }), null);
+  assert.equal(queues.checkout({ model: 'small-dense', instance: 'web' }), null);
 });
 
-test('checkout does not cross models, tokens, or unlimited leases', () => {
+test('checkout does not cross models, instances, or unlimited leases', () => {
   const { queues } = make();
-  const held = queues.acquire({ identityId: 'dsh-1', model: 'small-dense', clientToken: 'tok-A' });
-  const otherModel = queues.acquire({ identityId: 'dsh-2', model: 'medium-dense', clientToken: 'tok-A' });
-  const otherToken = queues.acquire({ identityId: 'dsh-3', model: 'medium-dense', clientToken: 'tok-B' });
-  const unlimited = queues.acquire({ identityId: 'dsh-4', model: 'deepseek-flash', clientToken: 'tok-A' });
+  queues.registerIdentity('dsh-1', { harness: 'dsh', instance: 'web' });
+  queues.registerIdentity('dsh-2', { harness: 'dsh', instance: 'web' });
+  queues.registerIdentity('dsh-3', { harness: 'dsh', instance: 'lab-foo' });
+  queues.registerIdentity('dsh-4', { harness: 'dsh', instance: 'web' });
+  const held = queues.acquire({ identityId: 'dsh-1', model: 'small-dense' });
+  const otherModel = queues.acquire({ identityId: 'dsh-2', model: 'medium-dense' });
+  const otherInstance = queues.acquire({ identityId: 'dsh-3', model: 'medium-dense' });
+  const unlimited = queues.acquire({ identityId: 'dsh-4', model: 'deepseek-flash' });
 
-  // Wrong model for the token.
-  assert.equal(queues.checkout({ model: 'medium-dense', clientToken: 'tok-A' })?.leaseId, otherModel.lease.id);
-  // Right model, wrong token.
-  assert.equal(queues.checkout({ model: 'small-dense', clientToken: 'tok-B' }), null);
+  // Wrong model for the instance.
+  assert.equal(queues.checkout({ model: 'medium-dense', instance: 'web' })?.leaseId, otherModel.lease.id);
+  // Right model, wrong instance.
+  assert.equal(queues.checkout({ model: 'small-dense', instance: 'lab-foo' }), null);
+  // The lab-foo lease is claimed by its own instance, not web's.
+  assert.equal(queues.checkout({ model: 'medium-dense', instance: 'lab-foo' })?.leaseId, otherInstance.lease.id);
   // Unlimited (unmapped) leases are never proxy-claimed.
   assert.equal(unlimited.status, 'unlimited');
-  assert.equal(queues.checkout({ model: 'deepseek-flash', clientToken: 'tok-A' }), null);
-  void otherToken;
+  assert.equal(queues.checkout({ model: 'deepseek-flash', instance: 'web' }), null);
+  void held;
 });
 
-test('checkout is oldest-first among a client\'s concurrent leases for one model', () => {
+test('checkout is oldest-first among an instance\'s concurrent leases for one model', () => {
   const { queues } = make({ queues: [{ id: 'gpu-a', limit: 2, models: ['small-dense'] }] });
-  const first = queues.acquire({ identityId: 'dsh-1', model: 'small-dense', clientToken: 'tok-A' });
-  const second = queues.acquire({ identityId: 'dsh-1', model: 'small-dense', clientToken: 'tok-A' });
-  assert.equal(queues.checkout({ model: 'small-dense', clientToken: 'tok-A' }).leaseId, first.lease.id);
-  assert.equal(queues.checkout({ model: 'small-dense', clientToken: 'tok-A' }).leaseId, second.lease.id);
-  assert.equal(queues.checkout({ model: 'small-dense', clientToken: 'tok-A' }), null);
+  queues.registerIdentity('dsh-1', { harness: 'dsh', instance: 'web' });
+  const first = queues.acquire({ identityId: 'dsh-1', model: 'small-dense' });
+  const second = queues.acquire({ identityId: 'dsh-1', model: 'small-dense' });
+  assert.equal(queues.checkout({ model: 'small-dense', instance: 'web' }).leaseId, first.lease.id);
+  assert.equal(queues.checkout({ model: 'small-dense', instance: 'web' }).leaseId, second.lease.id);
+  assert.equal(queues.checkout({ model: 'small-dense', instance: 'web' }), null);
 });
 
 test('checkout misses once the lease is released; release stays idempotent', () => {
   const { queues } = make();
-  const held = queues.acquire({ identityId: 'dsh-1', model: 'small-dense', clientToken: 'tok-A' });
-  assert.equal(queues.checkout({ model: 'small-dense', clientToken: 'tok-A' }).leaseId, held.lease.id);
+  queues.registerIdentity('dsh-1', { harness: 'dsh', instance: 'web' });
+  const held = queues.acquire({ identityId: 'dsh-1', model: 'small-dense' });
+  assert.equal(queues.checkout({ model: 'small-dense', instance: 'web' }).leaseId, held.lease.id);
   // The proxy releases after forwarding; the client's own release is a no-op.
   assert.equal(queues.release(held.lease.id, 'proxy_forwarded'), true);
   assert.equal(queues.release(held.lease.id, 'released'), false);
 });
 
-test('checkout with missing/blank args is a safe no-op', () => {
+test('checkout with missing/blank args, or an unregistered instance, is a safe no-op', () => {
   const { queues } = make();
-  queues.acquire({ identityId: 'dsh-1', model: 'small-dense', clientToken: 'tok-A' });
-  assert.equal(queues.checkout({ model: '', clientToken: 'tok-A' }), null);
-  assert.equal(queues.checkout({ model: 'small-dense', clientToken: '' }), null);
+  queues.registerIdentity('dsh-1', { harness: 'dsh', instance: 'web' });
+  queues.acquire({ identityId: 'dsh-1', model: 'small-dense' });
+  assert.equal(queues.checkout({ model: '', instance: 'web' }), null);
+  assert.equal(queues.checkout({ model: 'small-dense', instance: '' }), null);
   assert.equal(queues.checkout({}), null);
+  // An instance that holds no lease (or is unknown) misses.
+  assert.equal(queues.checkout({ model: 'small-dense', instance: 'nobody' }), null);
 });

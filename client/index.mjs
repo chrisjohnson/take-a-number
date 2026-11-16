@@ -302,15 +302,16 @@ export class TanClient {
   }
 
   /**
-   * Claim the lease this client is holding for (model, clientToken) so an
-   * admission proxy can forward the matching HTTP request without a second
-   * acquire. Resolves {leaseId, queue}; {leaseId: null} when there is no held
-   * lease to claim or the daemon is unreachable (the proxy then hard-queues).
+   * Claim the lease this client is holding for (model, instance) so an admission
+   * proxy can forward the matching HTTP request without a second acquire.
+   * `instance` is this client's self-identity (its registered instance name).
+   * Resolves {leaseId, queue}; {leaseId: null} when there is no held lease to
+   * claim or the daemon is unreachable (the proxy then hard-queues).
    */
-  async checkout({ model, clientToken } = {}) {
+  async checkout({ model, instance } = {}) {
     if (this.degraded || this.socket === null) return { leaseId: null, queue: null };
     try {
-      const res = await this.#send({ type: 'checkout', model, clientToken });
+      const res = await this.#send({ type: 'checkout', model, instance });
       return { leaseId: res.leaseId ?? null, queue: res.queue ?? null };
     } catch (error) {
       if (error instanceof TanError && (error.code === 'NOT_CONNECTED' || error.code === 'DISCONNECTED' || error.code === 'TIMEOUT')) {

@@ -164,9 +164,11 @@ export async function startProxy({
       return res.end(JSON.stringify({ error: 'body_too_large' }));
     }
     const model = extractModel(body);
-    const clientToken = typeof req.headers['x-tan-client'] === 'string' ? req.headers['x-tan-client'] : null;
+    // Self-identification, not a secret: the client's instance name (e.g. "web"),
+    // matching the instance it registered with the take-a-number daemon.
+    const instance = typeof req.headers['x-tan-client'] === 'string' ? req.headers['x-tan-client'] : null;
     try {
-      const decision = await admit({ model, clientToken, signal: controller.signal });
+      const decision = await admit({ model, instance, signal: controller.signal });
       const leaseId = decision.leaseId;
       await forward(req, res, body, { ...up, agent }, {
         signal: controller.signal,

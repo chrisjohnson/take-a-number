@@ -140,23 +140,23 @@ test('non-compliant request is hard-queued behind a hold, then forwarded on rele
 
 test('compliant request checks out its held lease (no double-acquire) and releases on settle', async () => {
   upstreamState.requests.length = 0;
-  const token = 'tok-compliant';
-  const lease = await holder.acquire({ model: 'small-dense', clientToken: token, kind: 'interactive-chat' });
+  // The holder registered as instance 'test'; it self-identifies with that name.
+  const lease = await holder.acquire({ model: 'small-dense', kind: 'interactive-chat' });
   assert.equal(lease.status, 'granted');
   // Slot is now 1/1. If the proxy double-acquired, this request would queue and
   // hang; it must check the lease out and forward immediately.
-  const res = await viaProxy({ body: { model: 'small-dense', messages: [] }, headers: { 'x-tan-client': token } });
+  const res = await viaProxy({ body: { model: 'small-dense', messages: [] }, headers: { 'x-tan-client': 'test' } });
   assert.equal(res.status, 200);
   assert.equal(upstreamState.requests.length, 1);
-  assert.equal(JSON.parse(res.text)['x-tan-client'], token); // header passed through
+  assert.equal(JSON.parse(res.text)['x-tan-client'], 'test'); // header passed through
   assert.equal(gpuA(await holder.status()).used, 0); // proxy released on settle
 });
 
-test('a compliant header with no matching held lease falls back to hard queueing', async () => {
+test('a self-identity with no matching held lease falls back to hard queueing', async () => {
   upstreamState.requests.length = 0;
   const hold = await holder.acquire({ model: 'small-dense' });
   assert.equal(hold.status, 'granted');
-  // The token matches no held lease (the holder acquired without a token).
+  // 'stray' is an instance name that holds no lease → no checkout → hard queue.
   const p = viaProxy({ body: { model: 'small-dense', messages: [] }, headers: { 'x-tan-client': 'stray' } });
   await new Promise((r) => setTimeout(r, 150));
   assert.equal(upstreamState.requests.length, 0); // queued, not forwarded

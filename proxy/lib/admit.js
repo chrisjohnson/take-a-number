@@ -4,10 +4,11 @@
 // No HTTP, no I/O: unit-testable with a fake client.
 //
 // Two entry classes share one FIFO queue:
-//   - compliant: the client reserved a lease for (model, clientToken); `admit`
-//     checks it out (claims it) so the matching HTTP request forwards without a
-//     second acquire. The caller releases the claimed lease when the request
-//     settles.
+//   - compliant: the client reserved a lease and SELF-IDENTIFIES via the
+//     x-tan-client header (its instance name, e.g. "web" — not a secret).
+//     `admit` checks that lease out (claims it by model + instance) so the
+//     matching HTTP request forwards without a second acquire. The caller
+//     releases the claimed lease when the request settles.
 //   - hard: everyone else. `admit` acquires a lease under the proxy's identity
 //     and long-polls until granted, honoring the caller's abort signal. The
 //     caller releases the acquired lease when the request settles.
@@ -18,14 +19,14 @@
 import { TanError } from '../../client/index.mjs';
 
 export function createAdmitter({ client }) {
-  return async function admit({ model, clientToken, signal } = {}) {
+  return async function admit({ model, instance, signal } = {}) {
     if (signal?.aborted) throw new TanError('ABORTED', 'aborted before admitting');
-    // Compliant path: claim a lease this client already reserved.
-    if (clientToken && model) {
-      const claim = await client.checkout({ model, clientToken });
+    // Compliant path: claim a lease this (self-identified) client reserved.
+    if (instance && model) {
+      const claim = await client.checkout({ model, instance });
       if (claim?.leaseId) return { leaseId: claim.leaseId, source: 'checkout' };
-      // No held lease (already claimed, or the client sent a request without a
-      // reservation): fall through to the hard path rather than double-acquire.
+      // No held lease (already claimed, or the request carried a name that
+      // holds no reservation): fall through to the hard path, not double-acquire.
     }
     return hardAdmit(client, { model, signal });
   };

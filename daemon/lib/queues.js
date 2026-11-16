@@ -222,10 +222,6 @@ export class Queues {
       turn: Number.isInteger(fields.turn) ? fields.turn : null,
       modality: typeof fields.modality === 'string' && fields.modality !== '' ? fields.modality : null,
       meta: fields.meta !== null && typeof fields.meta === 'object' && !Array.isArray(fields.meta) ? fields.meta : null,
-      // Per-instance token a compliant client stamps on its reservation so the
-      // admission proxy can claim THIS lease for the matching HTTP request
-      // (checkout by model + token) instead of double-acquiring.
-      clientToken: typeof fields.clientToken === 'string' && fields.clientToken !== '' ? fields.clientToken : null,
     };
     const queueId = this.queueFor(base.model, provider);
     if (queueId === null) {
@@ -391,21 +387,23 @@ export class Queues {
   }
 
   /**
-   * Claim the lease a compliant client is holding for (model, clientToken) so the
+   * Claim the lease a compliant client is holding for (model, instance) so the
    * admission proxy can forward the corresponding HTTP request without a second
-   * acquire (which would double-count the slot and risk self-deadlock). One
-   * checkout per lease: the first claimant wins, later claims for the same lease
-   * miss. Returns {leaseId, queue} or null when there is no matching held lease —
-   * the proxy then falls back to hard queueing.
+   * acquire (which would double-count the slot and risk self-deadlock). The
+   * `instance` is the client's SELF-IDENTITY (its registered identity's instance
+   * name, e.g. "web" / "lab-foo") — not a secret. One checkout per lease: the
+   * first claimant wins, later claims for the same lease miss. Returns {leaseId,
+   * queue} or null when there is no matching held lease — the proxy then falls
+   * back to hard queueing.
    */
-  checkout({ model, clientToken } = {}) {
+  checkout({ model, instance } = {}) {
     if (typeof model !== 'string' || model === '') return null;
-    if (typeof clientToken !== 'string' || clientToken === '') return null;
+    if (typeof instance !== 'string' || instance === '') return null;
     let oldest = null;
     for (const lease of this.leases.values()) {
       if (lease.queue === null) continue; // unlimited (unmapped) leases are not proxy-claimed
       if (lease.model !== model) continue;
-      if (lease.clientToken !== clientToken) continue;
+      if (this.identities.get(lease.identityId)?.instance !== instance) continue;
       if (lease.checkedOut) continue;
       if (oldest === null || lease.startedAt < oldest.startedAt) oldest = lease;
     }
