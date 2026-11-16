@@ -203,7 +203,7 @@ export function handleConnection(socket, deps, initialData) {
         }
         case 'acquire': {
           if (!registered) return fail(id, 'NOT_REGISTERED', 'register first');
-          const result = queues.acquire({ identityId, ...pick(msg, ['model', 'provider', 'kind', 'description', 'session', 'sessionTitle', 'turn', 'modality', 'meta']) });
+          const result = queues.acquire({ identityId, ...pick(msg, ['model', 'provider', 'kind', 'description', 'session', 'sessionTitle', 'turn', 'modality', 'meta', 'clientToken']) });
           if (result.status === 'queued') {
             return respond(id, true, {
               status: 'queued',
@@ -260,6 +260,12 @@ export function handleConnection(socket, deps, initialData) {
           if (typeof waiterId !== 'string') return fail(id, 'BAD_REQUEST', 'cancel needs a waiterId');
           const cancelled = queues.cancel(waiterId);
           return respond(id, true, { cancelled });
+        }
+        case 'checkout': {
+          if (!registered) return fail(id, 'NOT_REGISTERED', 'register first');
+          const { model, clientToken } = msg;
+          const result = queues.checkout({ model, clientToken });
+          return respond(id, true, { leaseId: result === null ? null : result.leaseId, queue: result === null ? null : result.queue });
         }
         case 'force-release': {
           const { leaseId } = msg;

@@ -222,6 +222,10 @@ export class Queues {
       turn: Number.isInteger(fields.turn) ? fields.turn : null,
       modality: typeof fields.modality === 'string' && fields.modality !== '' ? fields.modality : null,
       meta: fields.meta !== null && typeof fields.meta === 'object' && !Array.isArray(fields.meta) ? fields.meta : null,
+      // Per-instance token a compliant client stamps on its reservation so the
+      // admission proxy can claim THIS lease for the matching HTTP request
+      // (checkout by model + token) instead of double-acquiring.
+      clientToken: typeof fields.clientToken === 'string' && fields.clientToken !== '' ? fields.clientToken : null,
     };
     const queueId = this.queueFor(base.model, provider);
     if (queueId === null) {
@@ -384,6 +388,30 @@ export class Queues {
 
   forceRelease(leaseId) {
     return this.release(leaseId, 'force_release');
+  }
+
+  /**
+   * Claim the lease a compliant client is holding for (model, clientToken) so the
+   * admission proxy can forward the corresponding HTTP request without a second
+   * acquire (which would double-count the slot and risk self-deadlock). One
+   * checkout per lease: the first claimant wins, later claims for the same lease
+   * miss. Returns {leaseId, queue} or null when there is no matching held lease —
+   * the proxy then falls back to hard queueing.
+   */
+  checkout({ model, clientToken } = {}) {
+    if (typeof model !== 'string' || model === '') return null;
+    if (typeof clientToken !== 'string' || clientToken === '') return null;
+    let oldest = null;
+    for (const lease of this.leases.values()) {
+      if (lease.queue === null) continue; // unlimited (unmapped) leases are not proxy-claimed
+      if (lease.model !== model) continue;
+      if (lease.clientToken !== clientToken) continue;
+      if (lease.checkedOut) continue;
+      if (oldest === null || lease.startedAt < oldest.startedAt) oldest = lease;
+    }
+    if (oldest === null) return null;
+    oldest.checkedOut = true;
+    return { leaseId: oldest.id, queue: oldest.queue };
   }
 
   drain(queueId) {

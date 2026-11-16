@@ -100,9 +100,19 @@ differs in the ways that matter:
   per-turn wait cards) and the provider's idle timers don't start until a slot exists (exactly
   `dsh-model-capacity`'s "the wait happens before `next()` reaches the adapter" property).
 - **Scope:** per-GPU queues with explicit concurrency limits, not one global pipe.
-- **No proxy in the data path:** model traffic never touches the gate; only the small
-  acquire/release control messages do. The inference stream goes straight to the model server as
-  it does today.
+- **No proxy in the data path (v0.1–v0.2):** model traffic never touches the gate; only the
+  small acquire/release control messages do. The inference stream goes straight to the model
+  server as it does today.
+
+  *Superseded in part by the admission proxy (T4, v0.3.0).* Making queueing opt-in per harness
+  left a hole: any client that hits litellm directly (curl, another agent, a benchmark) tramples
+  the GPU unqueued. The admission proxy (`proxy/`) closes it by fronting litellm and queueing
+  **all** traffic. It is deliberately different from the retired haproxy: it is a **pure pipe**
+  (bytes pass through unmodified, SSE included; it never buffers the inference stream or
+  transforms the payload), it is **visible** (every hard-queued request is a named lease in the
+  same audit/dashboard), and it is **fail-open** (daemon down → forward). Compliant clients still
+  queue at the harness (they idle their loop); the proxy only adds the mandatory catch-all for
+  everyone else via a `checkout` of their already-held lease.
 
 ### 3.3 The reference implementation: `dsh-model-capacity` (v0.4.0)
 

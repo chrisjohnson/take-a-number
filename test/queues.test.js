@@ -195,3 +195,59 @@ test('rejected acquire is audited', () => {
   assert.throws(() => queues.acquire({ identityId: 'full', model: 'small-dense' }));
   assert.ok(events.some((e) => e.type === 'rejected' && e.reason === 'queue_full'));
 });
+
+test('checkout claims the matching held lease by (model, clientToken), once', () => {
+  const { queues } = make();
+  const held = queues.acquire({ identityId: 'dsh-1', model: 'small-dense', clientToken: 'tok-A' });
+  assert.equal(held.status, 'granted');
+
+  const claim = queues.checkout({ model: 'small-dense', clientToken: 'tok-A' });
+  assert.equal(claim.leaseId, held.lease.id);
+  assert.equal(claim.queue, 'gpu-a');
+
+  // A second claim for the same lease misses (one checkout per lease).
+  assert.equal(queues.checkout({ model: 'small-dense', clientToken: 'tok-A' }), null);
+});
+
+test('checkout does not cross models, tokens, or unlimited leases', () => {
+  const { queues } = make();
+  const held = queues.acquire({ identityId: 'dsh-1', model: 'small-dense', clientToken: 'tok-A' });
+  const otherModel = queues.acquire({ identityId: 'dsh-2', model: 'medium-dense', clientToken: 'tok-A' });
+  const otherToken = queues.acquire({ identityId: 'dsh-3', model: 'medium-dense', clientToken: 'tok-B' });
+  const unlimited = queues.acquire({ identityId: 'dsh-4', model: 'deepseek-flash', clientToken: 'tok-A' });
+
+  // Wrong model for the token.
+  assert.equal(queues.checkout({ model: 'medium-dense', clientToken: 'tok-A' })?.leaseId, otherModel.lease.id);
+  // Right model, wrong token.
+  assert.equal(queues.checkout({ model: 'small-dense', clientToken: 'tok-B' }), null);
+  // Unlimited (unmapped) leases are never proxy-claimed.
+  assert.equal(unlimited.status, 'unlimited');
+  assert.equal(queues.checkout({ model: 'deepseek-flash', clientToken: 'tok-A' }), null);
+  void otherToken;
+});
+
+test('checkout is oldest-first among a client\'s concurrent leases for one model', () => {
+  const { queues } = make({ queues: [{ id: 'gpu-a', limit: 2, models: ['small-dense'] }] });
+  const first = queues.acquire({ identityId: 'dsh-1', model: 'small-dense', clientToken: 'tok-A' });
+  const second = queues.acquire({ identityId: 'dsh-1', model: 'small-dense', clientToken: 'tok-A' });
+  assert.equal(queues.checkout({ model: 'small-dense', clientToken: 'tok-A' }).leaseId, first.lease.id);
+  assert.equal(queues.checkout({ model: 'small-dense', clientToken: 'tok-A' }).leaseId, second.lease.id);
+  assert.equal(queues.checkout({ model: 'small-dense', clientToken: 'tok-A' }), null);
+});
+
+test('checkout misses once the lease is released; release stays idempotent', () => {
+  const { queues } = make();
+  const held = queues.acquire({ identityId: 'dsh-1', model: 'small-dense', clientToken: 'tok-A' });
+  assert.equal(queues.checkout({ model: 'small-dense', clientToken: 'tok-A' }).leaseId, held.lease.id);
+  // The proxy releases after forwarding; the client's own release is a no-op.
+  assert.equal(queues.release(held.lease.id, 'proxy_forwarded'), true);
+  assert.equal(queues.release(held.lease.id, 'released'), false);
+});
+
+test('checkout with missing/blank args is a safe no-op', () => {
+  const { queues } = make();
+  queues.acquire({ identityId: 'dsh-1', model: 'small-dense', clientToken: 'tok-A' });
+  assert.equal(queues.checkout({ model: '', clientToken: 'tok-A' }), null);
+  assert.equal(queues.checkout({ model: 'small-dense', clientToken: '' }), null);
+  assert.equal(queues.checkout({}), null);
+});

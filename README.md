@@ -19,18 +19,32 @@ serialization point out of the harnesses and into one small daemon that owns the
 ## Architecture
 
 ```
- dsh (web) ─┐
- dsh (lab) ─┤  tan-client (ESM lib)     ┌─ UDS  /run/take-a-number/tan.sock
- opencode ──┼──────────────────────────►├─ TCP  127.0.0.1:4100  (protocol + HTTP + dashboard)
- tan CLI ───┘                            └─ daemon (node, zero deps)
-                                                 │
-                                   queues per GPU (FIFO) · leases · identities · audit
+                    ┌────────────────────────── take-a-number daemon ──────────────────────────┐
+ dsh (web) ─┐       │  UDS  /run/take-a-number/tan.sock                                        │
+ dsh (lab) ─┼ tan-  ├─ TCP  127.0.0.1:4100  (protocol + HTTP + dashboard)                      │
+ opencode ──┼ client┤                                                                         │
+ tan CLI ───┘ (ESM) └──────────────────────────────────────────────────────────────────────────┘
+                          │
+                          │  queues per GPU (FIFO) · leases · identities · audit
+                          ▲
+                          │  acquire / checkout / release (UDS)
+                          │
+            ┌─────────────┴─────────────┐
+            │   admission proxy          │   pipes bytes unmodified (SSE included)
+ any HTTP ─►│   (proxy/main.js)          ├──►  litellm / any OpenAI-compatible upstream
+ client ───►│   compliant → checkout     │
+ (curl,     │   everyone else → hard     │
+  agents,   │   queue, request held      │
+  benches)  └────────────────────────────┘
 ```
 
 - **`daemon/`** — the service. Pure state machine (`lib/queues.js`), protocol
   (`lib/protocol.js`), JSONL audit (`lib/audit.js`), entrypoint (`main.js`).
 - **`client/index.mjs`** — `TanClient` + `withLease()`. Plain ESM, zero runtime
   dependencies, runs on Node 20+ and Bun.
+- **`proxy/`** — the admission gate in front of litellm. `main.js` is the HTTP
+  server; `lib/admit.js` is the pure per-request admission decision (unit-testable
+  with a fake client). See [Admission proxy](#admission-proxy).
 - **`bin/tan`** — CLI: `status`, `acquire`, `tail`, `force-release`, `version`.
 - **`dashboard/`** — static, zero-dependency dashboard served by the daemon at `GET /`.
   Visual language ported from dsh-model-capacity's Activity UI (KPI cards, per-queue
@@ -49,7 +63,8 @@ cancelled, immediately. No TTL timers: a crashed process cannot hold a slot.
 | `register`     | `{ identityId }` — first message on a connection                        |
 | `acquire`      | `{ status: 'granted', leaseId, queue }` / `{ status: 'queued', waiterId, queue, position }` / `{ status: 'unlimited' }` |
 | `wait`         | long-poll ≤ 25 s: `{ status: 'granted', leaseId, queue, waitedMs }` / `{ status: 'still-queued', position }` / `{ status: 'cancelled' }` |
-| `release`      | `{ released }`                                                          |
+| `release`      | `{ released }` (idempotent — a second release is a no-op)               |
+| `checkout`     | `{ leaseId, queue }` / `{ leaseId: null }` — claim a held lease by (model, clientToken) |
 | `cancel`       | `{ cancelled }` (one waiter)                                            |
 | `force-release`| `{ released }` (ops)                                                    |
 | `status`       | full snapshot: queues, active leases, waiters, identities, history60    |
@@ -60,7 +75,9 @@ cancelled, immediately. No TTL timers: a crashed process cannot hold a slot.
 `interactive-chat`, `set-title`, `compaction`, `subagent`, `judge`, `generate`,
 `image-gen`, `call`), `description` (≤ 160 chars, e.g. `interactive-chat · turn 7 · "Fix
 the deploy script"`), `session`, `sessionTitle`, `turn`, `modality`
-(`text`/`image`/`embedding`/`other`), `meta` (free-form object).
+(`text`/`image`/`embedding`/`other`), `meta` (free-form object), and `clientToken`
+(a per-instance token a compliant client stamps on its reservation so the admission
+proxy can claim the matching lease via `checkout`).
 
 **Fail-open:** when the daemon is unreachable, `acquire` degrades to an un-gated
 pass-through after ~300 ms instead of blocking. Harnesses keep working; the queue is an
@@ -102,6 +119,63 @@ const result = await withLease(
 );
 ```
 
+## Admission proxy
+
+The plugin makes queueing **opt-in per harness**: dsh queues its own calls, but anything
+else that hits litellm directly (a raw curl, another agent, a benchmark) tramples the GPU
+unqueued. The admission proxy closes that gap by sitting in front of litellm and making
+queueing **mandatory for all traffic**, while preserving two entry postures that share one
+FIFO queue:
+
+- **Compliant clients** already reserved their turn in the daemon (they idle their own loop
+  while they wait). Their request carries a static `x-tan-client: <token>` header; the proxy
+  `checkout`s the matching held lease and forwards it straight through — no second acquire,
+  no double-count.
+- **Non-compliant clients** send a normal request. The proxy `acquire`s a lease on their
+  behalf and **holds the HTTP request open** until their turn, then forwards. Standard
+  "long request" concurrency; the client just sees a slow response.
+
+The proxy is a **gate, not a transformer**: it pipes request and response bytes unmodified
+(SSE token streams included) and adds one local round-trip to the daemon per request. Model
+traffic is KB/s, so data-path overhead is negligible.
+
+```sh
+node proxy/main.js --upstream 127.0.0.1:4000 --listen 127.0.0.1:4140 \
+  --sock /run/take-a-number/tan.sock --instance tan-proxy
+```
+
+| flag         | default                     | meaning                              |
+| ------------ | --------------------------- | ------------------------------------ |
+| `--upstream` | `127.0.0.1:4000`            | the litellm (OpenAI-compatible) target |
+| `--listen`   | `127.0.0.1:4140`            | where the proxy accepts model traffic |
+| `--sock`     | `/run/take-a-number/tan.sock` | daemon UDS                         |
+| `--tcp`      | `127.0.0.1:4100`            | daemon TCP fallback                  |
+| `--instance` | `tan-proxy`                 | the proxy's identity instance name   |
+
+Behavior:
+
+- **Model selection** — the `model` field of the (buffered, ≤ 64 MB) JSON body selects the
+  queue, using the daemon's own model→queue map. Unparseable/absent model = unmapped.
+- **Compliant** — `x-tan-client` + mapped model → `checkout { model, clientToken }`. A claim
+  forwards on the held lease; a miss falls back to hard queueing. The token is a light
+  per-instance secret: it disambiguates multiple instances and stops a non-compliant client
+  from piggybacking on someone else's held lease.
+- **Hard / unmapped** — `acquire` (real lease for a mapped model, unlimited lease for
+  unmapped), long-poll until grant, forward, release on settle.
+- **Fail-open** — daemon unreachable → forward without queueing (logged). The box's models
+  stay up even if the queue brain is down.
+- **Abort** — a client that goes away while queued cancels its waiter and frees the line;
+  while forwarding, the upstream leg is destroyed and the lease released.
+- **`/healthz`** — 200 for healthchecks, never queued.
+
+`release` is idempotent, so split release-ownership is safe: the proxy releases when the
+forwarded request settles and a compliant client may also release its own lease — whichever
+fires second is a no-op.
+
+In the end-state the proxy fronts litellm's public port (Caddy points at the proxy), making
+queueing mandatory for all external traffic. Until then it runs on its own port and clients
+opt in by pointing there.
+
 ## Running as a container
 
 ```sh
@@ -110,7 +184,18 @@ docker run --rm -it \
   -v /run/take-a-number:/run/take-a-number \
   -v /var/lib/take-a-number/audit:/var/lib/take-a-number/audit \
   -v /etc/take-a-number/config.json:/etc/take-a-number/config.json \
-  ghcr.io/chrisjohnson/take-a-number:v0.2.0
+  ghcr.io/chrisjohnson/take-a-number:latest
+```
+
+The same image runs the admission proxy with a command override (it shares the daemon's
+socket and audit volumes):
+
+```sh
+docker run --rm -it \
+  -p 127.0.0.1:4140:4140 \
+  -v /run/take-a-number:/run/take-a-number \
+  ghcr.io/chrisjohnson/take-a-number:latest \
+  node proxy/main.js --upstream 127.0.0.1:4000 --listen 0.0.0.0:4140
 ```
 
 The daemon's defaults are the container's contract: UDS at
@@ -134,8 +219,8 @@ with your own reverse proxy for external access.
 - A stale UDS file from a previous run is unlinked on start and on shutdown, so
   container restarts are clean.
 
-Images are built by CI from version tags (`vX.Y.Z` → `ghcr.io/chrisjohnson/take-a-number:vX.Y.Z`,
-plus `:latest`).
+Images are built by CI on push to `main` (`ghcr.io/chrisjohnson/take-a-number:<sha>` plus
+`:latest`), so the always-fresh image tracks the default branch.
 
 ## Deployment on local-ai-machine
 
@@ -145,10 +230,12 @@ queue config at `/etc/take-a-number/config.json`, audit at
 `/var/lib/take-a-number/audit`, and the dashboard behind Caddy at
 `https://tan.local-ai-machine.johnsonlab.dev` (token-gated). The queue config maps
 live LiteLLM model names to GPU queues (`strix-apu` = APU, `r9700-egpu` = eGPU);
-the seed comes from `modelctl list` + LiteLLM `/model/info`. The dsh harness gates
-via the `dsh-take-a-number` plugin (`chrisjohnson/dsh-plugins` →
-`packages/take-a-number`), pinned in `dsh-deploy`. See `tickets/` for the deploy
-plan and `PLAN.md` for the full architecture reference.
+the seed comes from `modelctl list` + LiteLLM `/model/info`. A second compose service
+(`tan-proxy`, same image) runs the admission proxy on `127.0.0.1:4140` in front of
+litellm. The dsh harness gates via the `dsh-take-a-number` plugin
+(`chrisjohnson/dsh-plugins` → `packages/take-a-number`), pinned in `dsh-deploy`, and
+carries a per-instance `x-tan-client` token so its calls take the compliant path. See
+`tickets/` for the deploy plan and `PLAN.md` for the full architecture reference.
 
 ## Files
 
@@ -159,7 +246,9 @@ plan and `PLAN.md` for the full architecture reference.
 | `daemon/lib/http.js`   | HTTP surface: dashboard + JSON API, optional token auth   |
 | `daemon/lib/audit.js`  | append-only JSONL audit, 14-day retention                   |
 | `daemon/main.js`       | entrypoint: UDS + TCP (protocol/HTTP routing), lifecycle  |
-| `client/index.mjs`     | TanClient, withLease (zero deps)                            |
+| `client/index.mjs`     | TanClient, withLease, checkout (zero deps)                  |
+| `proxy/main.js`        | admission proxy HTTP entrypoint                             |
+| `proxy/lib/admit.js`   | pure per-request admission decision (unit-testable)         |
 | `bin/tan`              | CLI                                                         |
 | `dashboard/`           | index.html, style.css, app.js (zero deps)                   |
 | `test/`                | node:test suites                                            |

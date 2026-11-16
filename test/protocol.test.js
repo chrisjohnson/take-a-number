@@ -132,6 +132,32 @@ test('acquire grants, second queues, release promotes via wait', async () => {
   b.raw.destroy();
 });
 
+test('checkout over the wire claims a clientToken-stamped lease, once', async () => {
+  const a = await registered();
+  const first = await a.request('acquire', { model: 'small-dense', clientToken: 'tok-wire' });
+  assert.equal(first.status, 'granted');
+
+  const claim = await a.request('checkout', { model: 'small-dense', clientToken: 'tok-wire' });
+  assert.equal(claim.ok, true);
+  assert.equal(claim.leaseId, first.leaseId);
+  assert.equal(claim.queue, 'gpu-a');
+
+  // Second claim on the same lease is a miss.
+  const again = await a.request('checkout', { model: 'small-dense', clientToken: 'tok-wire' });
+  assert.equal(again.leaseId, null);
+
+  await a.request('release', { leaseId: first.leaseId });
+  a.raw.destroy();
+});
+
+test('checkout without a matching lease or token returns null, not an error', async () => {
+  const a = await registered();
+  const res = await a.request('checkout', { model: 'small-dense', clientToken: 'nobody' });
+  assert.equal(res.ok, true);
+  assert.equal(res.leaseId, null);
+  a.raw.destroy();
+});
+
 test('wait long-poll times out with still-queued', async () => {
   const a = await registered();
   const b = await registered();

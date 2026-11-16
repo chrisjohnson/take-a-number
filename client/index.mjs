@@ -9,7 +9,7 @@ import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { hostname, userInfo } from 'node:os';
 
-export const VERSION = '0.1.4';
+export const VERSION = '0.3.0';
 
 export class TanError extends Error {
   constructor(code, message) {
@@ -299,6 +299,26 @@ export class TanClient {
 
   forceRelease(leaseId) {
     return this.#send({ type: 'force-release', leaseId }).catch(() => ({ released: false }));
+  }
+
+  /**
+   * Claim the lease this client is holding for (model, clientToken) so an
+   * admission proxy can forward the matching HTTP request without a second
+   * acquire. Resolves {leaseId, queue}; {leaseId: null} when there is no held
+   * lease to claim or the daemon is unreachable (the proxy then hard-queues).
+   */
+  async checkout({ model, clientToken } = {}) {
+    if (this.degraded || this.socket === null) return { leaseId: null, queue: null };
+    try {
+      const res = await this.#send({ type: 'checkout', model, clientToken });
+      return { leaseId: res.leaseId ?? null, queue: res.queue ?? null };
+    } catch (error) {
+      if (error instanceof TanError && (error.code === 'NOT_CONNECTED' || error.code === 'DISCONNECTED' || error.code === 'TIMEOUT')) {
+        this.#armDegradedTimer();
+        return { leaseId: null, queue: null };
+      }
+      throw error;
+    }
   }
 
   status() {
