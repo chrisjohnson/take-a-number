@@ -244,6 +244,15 @@ test('events stream pushes status frames on activity', async () => {
   a.raw.destroy();
 });
 
+test('event feed sends an initial snapshot on subscribe', () => {
+  const frames = [];
+  const unsubscribe = feed.subscribe((line) => frames.push(JSON.parse(line)));
+  assert.equal(frames.length, 1, 'subscriber gets the current state immediately');
+  assert.equal(frames[0].type, 'status');
+  assert.ok(frames[0].queues.some((q) => q.id === 'gpu-a'));
+  unsubscribe();
+});
+
 test('events subscription may open anonymously (no identity churn)', async () => {
   const fs = await import('node:fs');
   const auditFile = () => join(dir, 'audit', fs.readdirSync(join(dir, 'audit')).filter((f) => f.endsWith('.jsonl')).at(-1));

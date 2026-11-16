@@ -58,6 +58,20 @@ export class EventFeed {
   subscribe(write) {
     const sub = { write, last: Date.now() };
     this.subscribers.add(sub);
+    // Initial snapshot: subscribers see the current state immediately instead
+    // of waiting for the next event — a quiet machine must not render a
+    // blank dashboard until something happens.
+    if (this.frameBuilder !== null) {
+      try {
+        const frame = this.frameBuilder();
+        if (frame !== null) {
+          write(JSON.stringify(frame) + '\n');
+          sub.last = Date.now();
+        }
+      } catch {
+        // a builder failure surfaces on the next flush
+      }
+    }
     const keepAlive = setInterval(() => {
       if (Date.now() - sub.last >= KEEPALIVE_MS) {
         try {

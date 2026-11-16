@@ -17,7 +17,7 @@ import { httpHandler } from './lib/http.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const VERSION = '0.2.1';
+const VERSION = '0.2.2';
 
 function parseArgs(argv) {
   const args = {
