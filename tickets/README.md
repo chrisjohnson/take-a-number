@@ -1,6 +1,6 @@
 # Tickets — take-a-number
 
-Three tickets, in order. Each is self-contained: an agent with access to this box (user `t3code`),
+Five tickets, in order. Each is self-contained: an agent with access to this box (user `t3code`),
 the three repos (`chrisjohnson/take-a-number`, `chrisjohnson/dsh-plugins`, `chrisjohnson/dsh-deploy`,
 `chrisjohnson/local-ai-machine`), and the sudo surface documented in each ticket can complete it
 without a human. `PLAN.md` is the architecture reference; where a ticket and the plan disagree,
