@@ -17,7 +17,7 @@ import { httpHandler } from './lib/http.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const VERSION = '0.3.0';
+const VERSION = '0.4.0';
 
 function parseArgs(argv) {
   const args = {
@@ -125,6 +125,20 @@ const queues = new Queues({
 const feed = new EventFeed();
 feed.setFrameBuilder(() => ({ type: 'status', asOf: Date.now(), uptimeMs: uptimeMs(), version: VERSION, ...queues.snapshot() }));
 connectEvents(queues, feed, audit);
+
+// Free granted slots that were never claimed within the grant TTL (a static
+// client that never sent its request, or a dynamic client whose claim token
+// lapsed), and drop lapsed claim tokens. The Queues class itself is timer-free;
+// this is the one daemon-side clock that drives the sweep.
+const grantSweepMs = 5000;
+const grantSweep = setInterval(() => {
+  try {
+    queues.sweepStaleGrants();
+  } catch {
+    // a sweep failure must never take the daemon down
+  }
+}, grantSweepMs);
+grantSweep.unref();
 
 const persistConfig = () => {
   const dir = dirname(args.config);

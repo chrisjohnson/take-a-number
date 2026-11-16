@@ -263,3 +263,105 @@ test('checkout with missing/blank args, or an unregistered instance, is a safe n
   // An instance that holds no lease (or is unknown) misses.
   assert.equal(queues.checkout({ model: 'small-dense', instance: 'nobody' }), null);
 });
+
+test('dynamic grant mints a claim token; static grant does not', () => {
+  const { queues } = make();
+  queues.registerIdentity('dyn-1', { harness: 'opencode', instance: 'lab-a', capability: 'dynamic' });
+  queues.registerIdentity('sta-1', { harness: 'dsh', instance: 'web' }); // static (default)
+  const dyn = queues.acquire({ identityId: 'dyn-1', model: 'small-dense' });
+  const sta = queues.acquire({ identityId: 'sta-1', model: 'medium-dense' });
+  assert.ok(typeof dyn.lease.claimToken === 'string' && dyn.lease.claimToken !== '');
+  assert.equal(sta.lease.claimToken, undefined);
+});
+
+test('checkout dynamic: a valid token claims and consumes (one-time)', () => {
+  const { queues } = make();
+  queues.registerIdentity('dyn-1', { harness: 'opencode', instance: 'lab-a', capability: 'dynamic' });
+  const grant = queues.acquire({ identityId: 'dyn-1', model: 'small-dense' });
+  const token = grant.lease.claimToken;
+  const claim = queues.checkout({ model: 'small-dense', instance: 'lab-a', token });
+  assert.equal(claim.leaseId, grant.lease.id);
+  // Consumed: a second presentation of the same token misses.
+  assert.equal(queues.checkout({ model: 'small-dense', instance: 'lab-a', token }), null);
+});
+
+test('checkout dynamic: a missing token is a miss (falls to hard queue)', () => {
+  const { queues } = make();
+  queues.registerIdentity('dyn-1', { harness: 'opencode', instance: 'lab-a', capability: 'dynamic' });
+  const grant = queues.acquire({ identityId: 'dyn-1', model: 'small-dense' });
+  void grant;
+  // A dynamic identity with no token cannot be admitted by identity alone.
+  assert.equal(queues.checkout({ model: 'small-dense', instance: 'lab-a' }), null);
+});
+
+test('checkout dynamic: a lapsed token is a miss and is dropped', () => {
+  let t = 0;
+  const { queues } = make({ now: () => t });
+  queues.registerIdentity('dyn-1', { harness: 'opencode', instance: 'lab-a', capability: 'dynamic' });
+  const grant = queues.acquire({ identityId: 'dyn-1', model: 'small-dense' });
+  const token = grant.lease.claimToken;
+  t += 31_000; // past the 30 s grant TTL
+  assert.equal(queues.checkout({ model: 'small-dense', instance: 'lab-a', token }), null);
+  // The lapsed token is gone from the store (not just unusable this once).
+  assert.equal([...queues.claims.keys()].includes(token), false);
+});
+
+test('checkout dynamic: a wrong token, model, or instance is a miss', () => {
+  const { queues } = make();
+  queues.registerIdentity('dyn-1', { harness: 'opencode', instance: 'lab-a', capability: 'dynamic' });
+  queues.registerIdentity('dyn-2', { harness: 'opencode', instance: 'lab-b', capability: 'dynamic' });
+  const grant = queues.acquire({ identityId: 'dyn-1', model: 'small-dense' });
+  const token = grant.lease.claimToken;
+  assert.equal(queues.checkout({ model: 'small-dense', instance: 'lab-a', token: 'not-a-real-token' }), null);
+  assert.equal(queues.checkout({ model: 'medium-dense', instance: 'lab-a', token }), null);
+  assert.equal(queues.checkout({ model: 'small-dense', instance: 'lab-b', token }), null);
+  // The real presentation still works (the earlier misses consumed nothing).
+  assert.equal(queues.checkout({ model: 'small-dense', instance: 'lab-a', token })?.leaseId, grant.lease.id);
+});
+
+test('sweepStaleGrants frees an unclaimed static grant after the TTL', () => {
+  let t = 0;
+  const { queues } = make({ now: () => t });
+  queues.registerIdentity('sta-1', { harness: 'dsh', instance: 'web' });
+  const held = queues.acquire({ identityId: 'sta-1', model: 'small-dense' });
+  assert.equal(queues.used('gpu-a'), 1);
+  t += 31_000;
+  const swept = queues.sweepStaleGrants();
+  assert.equal(swept, 1);
+  assert.equal(queues.used('gpu-a'), 0);
+  assert.equal(queues.leases.has(held.lease.id), false);
+});
+
+test('sweepStaleGrants frees an unconsumed dynamic grant and drops its token', () => {
+  let t = 0;
+  const { queues } = make({ now: () => t });
+  queues.registerIdentity('dyn-1', { harness: 'opencode', instance: 'lab-a', capability: 'dynamic' });
+  const grant = queues.acquire({ identityId: 'dyn-1', model: 'small-dense' });
+  const token = grant.lease.claimToken;
+  t += 31_000;
+  queues.sweepStaleGrants();
+  assert.equal(queues.used('gpu-a'), 0);
+  assert.equal([...queues.claims.keys()].includes(token), false);
+});
+
+test('sweepStaleGrants leaves checked-out (in-flight) and unlimited leases alone', () => {
+  let t = 0;
+  const { queues } = make({ now: () => t });
+  queues.registerIdentity('sta-1', { harness: 'dsh', instance: 'web' });
+  const inFlight = queues.acquire({ identityId: 'sta-1', model: 'small-dense' });
+  queues.checkout({ model: 'small-dense', instance: 'web' }); // checked out: in flight
+  const unlimited = queues.acquire({ identityId: 'sta-1', model: 'deepseek-flash' });
+  t += 60_000;
+  assert.equal(queues.sweepStaleGrants(), 0);
+  assert.equal(queues.leases.has(inFlight.lease.id), true);
+  assert.equal(queues.leases.has(unlimited.lease.id), true);
+});
+
+test('release invalidates the outstanding claim token for that lease', () => {
+  const { queues } = make();
+  queues.registerIdentity('dyn-1', { harness: 'opencode', instance: 'lab-a', capability: 'dynamic' });
+  const grant = queues.acquire({ identityId: 'dyn-1', model: 'small-dense' });
+  const token = grant.lease.claimToken;
+  queues.release(grant.lease.id, 'identity_down');
+  assert.equal(queues.checkout({ model: 'small-dense', instance: 'lab-a', token }), null);
+});

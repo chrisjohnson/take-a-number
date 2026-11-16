@@ -20,6 +20,8 @@ const BODY_CAP = 64 * 1024 * 1024;
 const STRIP = new Set([
   'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
   'te', 'trailing-headers', 'transfer-encoding', 'upgrade', 'host', 'content-length',
+  // Proxy-internal admission headers: never forwarded to the upstream model.
+  'x-tan-client', 'x-tan-claim',
 ]);
 
 function parseArgs(argv) {
@@ -167,8 +169,11 @@ export async function startProxy({
     // Self-identification, not a secret: the client's instance name (e.g. "web"),
     // matching the instance it registered with the take-a-number daemon.
     const instance = typeof req.headers['x-tan-client'] === 'string' ? req.headers['x-tan-client'] : null;
+    // Dynamic clients also present the one-time claim token minted at grant
+    // (x-tan-claim). Static clients omit it; the daemon ignores it for them.
+    const claimToken = typeof req.headers['x-tan-claim'] === 'string' && req.headers['x-tan-claim'] !== '' ? req.headers['x-tan-claim'] : undefined;
     try {
-      const decision = await admit({ model, instance, signal: controller.signal });
+      const decision = await admit({ model, instance, claimToken, signal: controller.signal });
       const leaseId = decision.leaseId;
       await forward(req, res, body, { ...up, agent }, {
         signal: controller.signal,

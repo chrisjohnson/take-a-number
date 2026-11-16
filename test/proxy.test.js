@@ -29,7 +29,8 @@ let upstreamPort;
 let upstreamState;
 let proxy;
 let proxyPort;
-let holder; // a "dsh" stand-in: reserves leases, holds slots
+let holder; // a "dsh" stand-in: reserves leases, holds slots (static)
+let dynHolder; // a dynamic-client stand-in: reserves leases, presents claim tokens
 
 function startDaemon() {
   const server = createServer((socket) =>
@@ -88,9 +89,12 @@ before(async () => {
 
   holder = new TanClient({ sock: sockPath, tcp: '127.0.0.1:1', harness: 'dsh', instance: 'test', degradedAfterMs: 200 });
   await holder.connect();
+  dynHolder = new TanClient({ sock: sockPath, tcp: '127.0.0.1:1', harness: 'opencode', instance: 'dyn', capability: 'dynamic', degradedAfterMs: 200 });
+  await dynHolder.connect();
 });
 
 after(async () => {
+  dynHolder?.close();
   holder?.close();
   await proxy?.close();
   upstream?.close();
@@ -148,8 +152,42 @@ test('compliant request checks out its held lease (no double-acquire) and releas
   const res = await viaProxy({ body: { model: 'small-dense', messages: [] }, headers: { 'x-tan-client': 'test' } });
   assert.equal(res.status, 200);
   assert.equal(upstreamState.requests.length, 1);
-  assert.equal(JSON.parse(res.text)['x-tan-client'], 'test'); // header passed through
+  // x-tan-client is proxy-internal: stripped before forwarding to the upstream.
+  assert.equal(JSON.parse(res.text)['x-tan-client'], null);
   assert.equal(gpuA(await holder.status()).used, 0); // proxy released on settle
+});
+
+test('dynamic client presents its claim token and is forwarded (no double-acquire)', async () => {
+  upstreamState.requests.length = 0;
+  const grant = await dynHolder.acquire({ model: 'small-dense', kind: 'interactive-chat' });
+  assert.equal(grant.status, 'granted');
+  assert.ok(typeof grant.claimToken === 'string');
+  // Slot is 1/1. A valid token must check the lease out and forward immediately.
+  const res = await viaProxy({
+    body: { model: 'small-dense', messages: [] },
+    headers: { 'x-tan-client': 'dyn', 'x-tan-claim': grant.claimToken },
+  });
+  assert.equal(res.status, 200);
+  assert.equal(upstreamState.requests.length, 1);
+  // x-tan-claim is proxy-internal: stripped before forwarding.
+  assert.equal(JSON.parse(res.text)['x-tan-client'], null);
+  assert.equal(gpuA(await dynHolder.status()).used, 0); // proxy released on settle
+});
+
+test('dynamic client without a token falls back to hard queueing', async () => {
+  upstreamState.requests.length = 0;
+  const grant = await dynHolder.acquire({ model: 'small-dense' });
+  assert.equal(grant.status, 'granted');
+  // No x-tan-claim: a dynamic identity cannot be admitted by identity alone, so
+  // the proxy hard-queues the request behind the held slot.
+  const p = viaProxy({ body: { model: 'small-dense', messages: [] }, headers: { 'x-tan-client': 'dyn' } });
+  await new Promise((r) => setTimeout(r, 150));
+  assert.equal(upstreamState.requests.length, 0); // queued, not forwarded
+  assert.equal(gpuA(await dynHolder.status()).waiters.length, 1);
+  dynHolder.release(grant.leaseId);
+  const res = await p;
+  assert.equal(res.status, 200);
+  assert.equal(upstreamState.requests.length, 1);
 });
 
 test('a self-identity with no matching held lease falls back to hard queueing', async () => {

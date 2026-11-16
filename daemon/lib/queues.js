@@ -15,6 +15,13 @@ const nowMs = () => Date.now();
 
 const DESC_MAX = 160;
 
+// A granted slot that is not claimed (checked out) within this window is freed
+// back to the queue. Covers both capability classes: a static client that never
+// sends its request, and a dynamic client whose claim token lapses before it is
+// presented. Once a lease is checked out (its request is in flight) the TTL no
+// longer applies — slow generations run to completion.
+const GRANT_TTL_MS = 30_000;
+
 function clampDescription(value) {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
@@ -48,8 +55,10 @@ export class Queues {
     this.buckets = new Map();
     this.leases = new Map();
     this.waiters = new Map();
-    this.grants = new Map(); // waiterId -> {leaseId, queue, waitedMs, identityId}; survives promotion
-    this.identities = new Map(); // identityId -> {harness, instance, pid, host, user, connectedAt}
+    this.grants = new Map(); // waiterId -> {leaseId, queue, waitedMs, identityId, claimToken}; survives promotion
+    this.identities = new Map(); // identityId -> {harness, instance, pid, host, user, capability, connectedAt}
+    this.claims = new Map(); // claimToken -> {leaseId, instance, model, expiresAt}; dynamic-client one-time grants
+    this.grantTtlMs = GRANT_TTL_MS;
     this.modelQueue = new Map();
     this.configure(queues ?? []);
   }
@@ -90,8 +99,14 @@ export class Queues {
   }
 
   registerIdentity(identityId, info) {
-    this.identities.set(identityId, { ...info, connectedAt: this.now() });
-    this.onEvent('identity_up', { identityId, ...info });
+    // capability: 'dynamic' clients present a one-time claim token with their
+    // request; 'static' clients (the default) are admitted by identity alone,
+    // one request per grant. Unknown/absent is treated as static for
+    // backwards compatibility with clients that predate the field.
+    const capability = info.capability === 'dynamic' ? 'dynamic' : 'static';
+    const record = { ...info, capability, connectedAt: this.now() };
+    this.identities.set(identityId, record);
+    this.onEvent('identity_up', { identityId, ...record });
   }
 
   identityDown(identityId) {
@@ -182,6 +197,18 @@ export class Queues {
     delete lease.enqueuedAt;
     bucket.active.set(id, lease);
     this.leases.set(id, lease);
+    // Dynamic clients get a one-time claim token for this grant, valid for the
+    // grant TTL. Static clients (and unlimited leases) get none — they are
+    // admitted by identity alone. The token is the proof-of-possession the
+    // admission proxy validates before forwarding.
+    if (!lease.unlimited) {
+      const capability = this.identities.get(lease.identityId)?.capability;
+      if (capability === 'dynamic') {
+        const token = randomUUID();
+        this.claims.set(token, { leaseId: id, instance: this.identities.get(lease.identityId)?.instance ?? null, model: lease.model ?? null, expiresAt: this.now() + this.grantTtlMs });
+        lease.claimToken = token;
+      }
+    }
     this.onEvent('granted', {
       leaseId: id,
       queue: queueId,
@@ -195,6 +222,7 @@ export class Queues {
       turn: lease.turn ?? null,
       modality: lease.modality ?? null,
       meta: lease.meta ?? null,
+      claimToken: lease.claimToken ?? null,
       waitedMs: Math.max(0, Number(lease.waitedMs ?? 0)),
       active: bucket.active.size,
       limit: bucket.limit === Infinity ? null : bucket.limit,
@@ -304,7 +332,7 @@ export class Queues {
   // "who" without a join against the identity_up lines.
   #idFields(identityId) {
     const info = this.identities.get(identityId);
-    return info ? { harness: info.harness, instance: info.instance, pid: info.pid, host: info.host, user: info.user } : {};
+    return info ? { harness: info.harness, instance: info.instance, pid: info.pid, host: info.host, user: info.user, capability: info.capability } : {};
   }
 
   /**
@@ -357,6 +385,11 @@ export class Queues {
     for (const [wid, grant] of this.grants) {
       if (grant.leaseId === leaseId) this.grants.delete(wid);
     }
+    // A freed lease invalidates its outstanding claim token (if any), so a
+    // dynamic client cannot present a token for a grant that no longer exists.
+    for (const [tok, claim] of this.claims) {
+      if (claim.leaseId === leaseId) this.claims.delete(tok);
+    }
     if (lease.queue !== null) {
       const bucket = this.#bucket(lease.queue);
       bucket.active.delete(leaseId);
@@ -387,18 +420,33 @@ export class Queues {
   }
 
   /**
-   * Claim the lease a compliant client is holding for (model, instance) so the
-   * admission proxy can forward the corresponding HTTP request without a second
-   * acquire (which would double-count the slot and risk self-deadlock). The
-   * `instance` is the client's SELF-IDENTITY (its registered identity's instance
-   * name, e.g. "web" / "lab-foo") — not a secret. One checkout per lease: the
-   * first claimant wins, later claims for the same lease miss. Returns {leaseId,
-   * queue} or null when there is no matching held lease — the proxy then falls
-   * back to hard queueing.
+   * Admit the HTTP request a compliant client is making for (model, instance) so
+   * the admission proxy can forward it without a second acquire (which would
+   * double-count the slot and risk self-deadlock). The behavior depends on the
+   * identity's registered CAPABILITY:
+   *
+   *   static  — the `instance` is the client's self-identity (e.g. "web"). The
+   *             oldest held lease for (model, instance) is claimed, one per grant;
+   *             a later request for the same lease misses and falls to hard queue.
+   *             `token` is ignored.
+   *   dynamic — a one-time `token` (minted at grant) is REQUIRED. It is validated
+   *             against the claim store (present, unexpired, matching lease) and
+   *             consumed on success. A missing/expired/wrong token misses.
+   *
+   * `instance` is self-identification, not a secret. Returns {leaseId, queue} or
+   * null when nothing can be claimed — the proxy then falls back to hard queueing.
    */
-  checkout({ model, instance } = {}) {
+  checkout({ model, instance, token } = {}) {
     if (typeof model !== 'string' || model === '') return null;
     if (typeof instance !== 'string' || instance === '') return null;
+    if (this.#capabilityForInstance(instance) === 'dynamic') {
+      if (typeof token !== 'string' || token === '') return null;
+      return this.#checkoutDynamic(model, instance, token);
+    }
+    return this.#checkoutStatic(model, instance);
+  }
+
+  #checkoutStatic(model, instance) {
     let oldest = null;
     for (const lease of this.leases.values()) {
       if (lease.queue === null) continue; // unlimited (unmapped) leases are not proxy-claimed
@@ -412,6 +460,51 @@ export class Queues {
     return { leaseId: oldest.id, queue: oldest.queue };
   }
 
+  #checkoutDynamic(model, instance, token) {
+    const claim = this.claims.get(token);
+    if (claim === undefined) return null;
+    if (claim.expiresAt <= this.now()) {
+      this.claims.delete(token); // lapsed: drop it
+      return null;
+    }
+    const lease = this.leases.get(claim.leaseId);
+    if (lease === undefined || lease.released || lease.checkedOut) return null;
+    if (lease.model !== model) return null;
+    if (claim.instance !== instance) return null;
+    this.claims.delete(token); // consume: one request per token
+    lease.checkedOut = true;
+    return { leaseId: lease.id, queue: lease.queue };
+  }
+
+  /** The capability registered under an instance name, defaulting to static. */
+  #capabilityForInstance(instance) {
+    for (const info of this.identities.values()) {
+      if (info.instance === instance) return info.capability === 'dynamic' ? 'dynamic' : 'static';
+    }
+    return 'static';
+  }
+
+  /**
+   * Free granted slots that were never claimed within the grant TTL, and drop
+   * lapsed claim tokens. Called on a timer by the protocol layer (no timers live
+   * in this class). Returns the number of leases released.
+   */
+  sweepStaleGrants(now = this.now()) {
+    let swept = 0;
+    for (const lease of this.leases.values()) {
+      if (lease.queue === null) continue; // unlimited leases: no grant TTL
+      if (lease.checkedOut) continue; // in flight: runs to completion
+      if (now - lease.startedAt > this.grantTtlMs) {
+        this.release(lease.id, 'grant_expired');
+        swept += 1;
+      }
+    }
+    for (const [tok, claim] of this.claims) {
+      if (claim.expiresAt <= now) this.claims.delete(tok);
+    }
+    return swept;
+  }
+
   drain(queueId) {
     const bucket = this.buckets.get(queueId);
     if (bucket === undefined) return;
@@ -421,8 +514,9 @@ export class Queues {
       this.waiters.delete(waiter.id);
       const lease = this.#lease(queueId, { ...waiter, waitedMs: Math.max(0, this.now() - waiter.enqueuedAt) });
       // Remember the grant so a `wait` that arrives AFTER promotion can still
-      // claim its lease (the waiter is already gone from the queue).
-      this.grants.set(waiter.id, { leaseId: lease.id, queue: queueId, waitedMs: lease.waitedMs, identityId: waiter.identityId });
+      // claim its lease (the waiter is already gone from the queue). The
+      // claimToken (dynamic clients) rides along so takeGrant can hand it back.
+      this.grants.set(waiter.id, { leaseId: lease.id, queue: queueId, waitedMs: lease.waitedMs, identityId: waiter.identityId, claimToken: lease.claimToken ?? null });
       const { resolve, ...rest } = waiter;
       void rest;
       if (typeof resolve === 'function') {

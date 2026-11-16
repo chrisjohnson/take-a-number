@@ -60,11 +60,11 @@ cancelled, immediately. No TTL timers: a crashed process cannot hold a slot.
 
 | request        | response (when ok)                                                     |
 | -------------- | ---------------------------------------------------------------------- |
-| `register`     | `{ identityId }` — first message on a connection                        |
-| `acquire`      | `{ status: 'granted', leaseId, queue }` / `{ status: 'queued', waiterId, queue, position }` / `{ status: 'unlimited' }` |
-| `wait`         | long-poll ≤ 25 s: `{ status: 'granted', leaseId, queue, waitedMs }` / `{ status: 'still-queued', position }` / `{ status: 'cancelled' }` |
+| `register`     | `{ identityId }` — first message on a connection; carries `capability` (`static` default \| `dynamic`) |
+| `acquire`      | `{ status: 'granted', leaseId, queue, claimToken? }` / `{ status: 'queued', waiterId, queue, position }` / `{ status: 'unlimited' }` |
+| `wait`         | long-poll ≤ 25 s: `{ status: 'granted', leaseId, queue, waitedMs, claimToken? }` / `{ status: 'still-queued', position }` / `{ status: 'cancelled' }` |
 | `release`      | `{ released }` (idempotent — a second release is a no-op)               |
-| `checkout`     | `{ leaseId, queue }` / `{ leaseId: null }` — claim a held lease by (model, instance) |
+| `checkout`     | `{ leaseId, queue }` / `{ leaseId: null }` — admit a request by (model, instance[, token]) |
 | `cancel`       | `{ cancelled }` (one waiter)                                            |
 | `force-release`| `{ released }` (ops)                                                    |
 | `status`       | full snapshot: queues, active leases, waiters, identities, history60    |
@@ -154,13 +154,21 @@ Behavior:
 
 - **Model selection** — the `model` field of the (buffered, ≤ 64 MB) JSON body selects the
   queue, using the daemon's own model→queue map. Unparseable/absent model = unmapped.
-- **Compliant** — `x-tan-client: <instance-name>` + mapped model →
-  `checkout { model, instance }`. The header carries the client's **self-identity** — the
-  same instance name it registered with the daemon (`web`, `lab-foo`, …) — not a secret. A
-  claim forwards on that instance's held lease; a miss falls back to hard queueing. Because
-  it is self-identification, a non-compliant client can at best *claim* an instance name to
-  skip the line once per held lease (a fairness skew, visible in the audit) — not a security
-  hole, since litellm remains the API-key enforcement layer.
+- **Compliant** — `x-tan-client: <instance-name>` (+ `x-tan-claim: <token>` for dynamic
+  clients) + mapped model → `checkout { model, instance, token? }`. The instance name is the
+  client's **self-identity** (the name it registered with the daemon — `web`, `lab-foo`, …) —
+  not a secret. How it's admitted depends on the identity's registered **capability**:
+  - **static** (e.g. dsh, which can't inject a per-call header): admitted by identity alone,
+    **one request per grant** — the first request claims the held lease, a second falls to the
+    hard queue. A name-spoofing skew is possible (visible in the audit) but not a security hole:
+    litellm is still the API-key layer.
+  - **dynamic** (e.g. opencode/curl, which can present a header): the daemon mints a **one-time
+    claim token** at grant (returned on `acquire`/`wait`), valid for a 30 s TTL. The client
+    presents it via `x-tan-claim`; the daemon validates and **consumes** it. A missing, lapsed,
+    or wrong token falls to the hard queue.
+- **Grant TTL** — a granted slot not claimed within 30 s is freed back to the queue (a static
+  client that never sent its request, or a dynamic client whose token lapsed). In-flight
+  (checked-out) leases and unlimited leases are exempt.
 - **Hard / unmapped** — `acquire` (real lease for a mapped model, unlimited lease for
   unmapped), long-poll until grant, forward, release on settle.
 - **Fail-open** — daemon unreachable → forward without queueing (logged). The box's models

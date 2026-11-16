@@ -9,7 +9,7 @@ import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { hostname, userInfo } from 'node:os';
 
-export const VERSION = '0.3.0';
+export const VERSION = '0.4.0';
 
 export class TanError extends Error {
   constructor(code, message) {
@@ -39,23 +39,27 @@ export class TanClient {
    * @param {string} [opts.sock] UDS path (default /run/take-a-number/tan.sock)
    * @param {string} [opts.tcp]  TCP host:port (default 127.0.0.1:4100)
    * @param {string} opts.harness  'dsh' | 'opencode' | …
-   * @param {string} [opts.instance] 'web' | 'lab-<name>' | …
-   * @param {string} [opts.user]
-   * @param {number} [opts.degradedAfterMs] flip to fail-open after this long unreachable (default 300)
-   */
-  constructor({
-    sock = '/run/take-a-number/tan.sock',
-    tcp = '127.0.0.1:4100',
-    harness,
-    instance = 'default',
-    user,
-    degradedAfterMs = 300,
-  } = {}) {
-    if (!harness) throw new TanError('BAD_CONFIG', 'TanClient needs a harness');
-    this.sock = sock;
-    this.tcp = tcp;
-    this.identity = { harness, instance, pid: process.pid, host: hostname(), user: user ?? deriveUser(userInfo), version: VERSION };
-    this.degradedAfterMs = degradedAfterMs;
+    * @param {string} [opts.instance] 'web' | 'lab-<name>' | …
+    * @param {string} [opts.user]
+    * @param {'static'|'dynamic'} [opts.capability] 'static' (default): admitted by
+    *   identity alone, one request per grant. 'dynamic': the client will present a
+    *   one-time claim token (returned on grant) with its request.
+    * @param {number} [opts.degradedAfterMs] flip to fail-open after this long unreachable (default 300)
+    */
+   constructor({
+     sock = '/run/take-a-number/tan.sock',
+     tcp = '127.0.0.1:4100',
+     harness,
+     instance = 'default',
+     user,
+     capability = 'static',
+     degradedAfterMs = 300,
+   } = {}) {
+     if (!harness) throw new TanError('BAD_CONFIG', 'TanClient needs a harness');
+     this.sock = sock;
+     this.tcp = tcp;
+     this.identity = { harness, instance, pid: process.pid, host: hostname(), user: user ?? deriveUser(userInfo), version: VERSION, capability: capability === 'dynamic' ? 'dynamic' : 'static' };
+     this.degradedAfterMs = degradedAfterMs;
 
     this.socket = null;
     this.identityId = null;
@@ -317,13 +321,15 @@ export class TanClient {
    * Claim the lease this client is holding for (model, instance) so an admission
    * proxy can forward the matching HTTP request without a second acquire.
    * `instance` is this client's self-identity (its registered instance name).
-   * Resolves {leaseId, queue}; {leaseId: null} when there is no held lease to
-   * claim or the daemon is unreachable (the proxy then hard-queues).
+   * `token` is the one-time claim token a dynamic client presents (minted at
+   * grant); static clients omit it. Resolves {leaseId, queue}; {leaseId: null}
+   * when there is no held lease to claim (or the token is invalid/lapsed) or the
+   * daemon is unreachable (the proxy then hard-queues).
    */
-  async checkout({ model, instance } = {}) {
+  async checkout({ model, instance, token } = {}) {
     if (this.degraded || this.socket === null) return { leaseId: null, queue: null };
     try {
-      const res = await this.#send({ type: 'checkout', model, instance });
+      const res = await this.#send({ type: 'checkout', model, instance, ...(token !== undefined ? { token } : {}) });
       return { leaseId: res.leaseId ?? null, queue: res.queue ?? null };
     } catch (error) {
       if (error instanceof TanError && (error.code === 'NOT_CONNECTED' || error.code === 'DISCONNECTED' || error.code === 'TIMEOUT')) {

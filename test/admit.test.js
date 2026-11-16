@@ -57,6 +57,23 @@ test('compliant checkout miss falls through to the hard path', async () => {
   assert.equal(client.calls.acquire.length, 1);
 });
 
+test('a claimToken is passed to checkout (dynamic client)', async () => {
+  const client = fakeClient({ checkout: () => ({ leaseId: 'L-held', queue: 'q' }) });
+  const admit = createAdmitter({ client });
+  const decision = await admit({ model: 'small-dense', instance: 'lab-a', claimToken: 'tok-123' });
+  assert.equal(decision.leaseId, 'L-held');
+  assert.equal(decision.source, 'checkout');
+  assert.deepEqual(client.calls.checkout[0], { model: 'small-dense', instance: 'lab-a', token: 'tok-123' });
+});
+
+test('no claimToken omits the token key from checkout (static client)', async () => {
+  const client = fakeClient({ checkout: () => ({ leaseId: 'L-held', queue: 'q' }) });
+  const admit = createAdmitter({ client });
+  await admit({ model: 'small-dense', instance: 'web' });
+  assert.deepEqual(client.calls.checkout[0], { model: 'small-dense', instance: 'web' });
+  assert.equal('token' in client.calls.checkout[0], false);
+});
+
 test('no instance name goes straight to the hard path (no checkout)', async () => {
   const client = fakeClient();
   const admit = createAdmitter({ client });

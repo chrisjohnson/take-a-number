@@ -19,14 +19,17 @@
 import { TanError } from '../../client/index.mjs';
 
 export function createAdmitter({ client }) {
-  return async function admit({ model, instance, signal } = {}) {
+  return async function admit({ model, instance, claimToken, signal } = {}) {
     if (signal?.aborted) throw new TanError('ABORTED', 'aborted before admitting');
-    // Compliant path: claim a lease this (self-identified) client reserved.
+    // Compliant path: claim a lease this (self-identified) client reserved. The
+    // daemon decides by the identity's capability — static admits by identity
+    // alone (one per grant); dynamic requires the one-time claimToken, which it
+    // validates and consumes. `claimToken` is undefined for static clients.
     if (instance && model) {
-      const claim = await client.checkout({ model, instance });
+      const claim = await client.checkout({ model, instance, ...(claimToken !== undefined ? { token: claimToken } : {}) });
       if (claim?.leaseId) return { leaseId: claim.leaseId, source: 'checkout' };
-      // No held lease (already claimed, or the request carried a name that
-      // holds no reservation): fall through to the hard path, not double-acquire.
+      // Nothing claimable (static: already claimed; dynamic: missing/lapsed/wrong
+      // token): fall through to the hard path, not double-acquire.
     }
     return hardAdmit(client, { model, signal });
   };

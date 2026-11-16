@@ -154,7 +154,7 @@ export function handleConnection(socket, deps, initialData) {
     if (entry === undefined || entry !== pending) return;
     clearTimeout(pending.timer);
     pendingWaits.delete(waiterId);
-    respond(pending.id, true, { status: 'granted', leaseId: result.lease.id, queue: result.queue, waitedMs: result.waitedMs });
+    respond(pending.id, true, { status: 'granted', leaseId: result.lease.id, queue: result.queue, waitedMs: result.waitedMs, claimToken: result.lease.claimToken ?? null });
   };
 
   const onRejected = (waiterId, pending) => () => {
@@ -185,7 +185,7 @@ export function handleConnection(socket, deps, initialData) {
       switch (type) {
         case 'register': {
           if (registered) return fail(id, 'ALREADY_REGISTERED', 'connection already registered');
-          const { harness, instance, pid, host, user, version: clientVersion } = msg;
+          const { harness, instance, pid, host, user, version: clientVersion, capability } = msg;
           if (typeof harness !== 'string' || harness === '') return fail(id, 'BAD_REQUEST', 'register needs a harness');
           identityId = randomUUID();
           const info = {
@@ -195,6 +195,7 @@ export function handleConnection(socket, deps, initialData) {
             host: typeof host === 'string' ? host : 'unknown',
             user: typeof user === 'string' ? user : 'unknown',
             version: typeof clientVersion === 'string' ? clientVersion : null,
+            capability: capability === 'dynamic' ? 'dynamic' : 'static',
           };
           queues.registerIdentity(identityId, info);
           registered = true;
@@ -214,7 +215,7 @@ export function handleConnection(socket, deps, initialData) {
               limit: result.limit,
             });
           }
-          return respond(id, true, { status: result.status, leaseId: result.lease.id, queue: result.queue });
+          return respond(id, true, { status: result.status, leaseId: result.lease.id, queue: result.queue, claimToken: result.lease.claimToken ?? null });
         }
         case 'wait': {
           if (!registered) return fail(id, 'NOT_REGISTERED', 'register first');
@@ -223,7 +224,7 @@ export function handleConnection(socket, deps, initialData) {
           if (queues.waiters.get(waiterId) === undefined) {
             const grant = queues.takeGrant(waiterId);
             if (grant) {
-              return respond(id, true, { status: 'granted', leaseId: grant.leaseId, queue: grant.queue, waitedMs: grant.waitedMs });
+              return respond(id, true, { status: 'granted', leaseId: grant.leaseId, queue: grant.queue, waitedMs: grant.waitedMs, claimToken: grant.claimToken ?? null });
             }
             return fail(id, 'NO_SUCH_WAITER', `unknown waiter "${waiterId}"`);
           }
@@ -263,8 +264,8 @@ export function handleConnection(socket, deps, initialData) {
         }
         case 'checkout': {
           if (!registered) return fail(id, 'NOT_REGISTERED', 'register first');
-          const { model, instance } = msg;
-          const result = queues.checkout({ model, instance });
+          const { model, instance, token } = msg;
+          const result = queues.checkout({ model, instance, token });
           return respond(id, true, { leaseId: result === null ? null : result.leaseId, queue: result === null ? null : result.queue });
         }
         case 'force-release': {

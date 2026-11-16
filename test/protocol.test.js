@@ -158,6 +158,41 @@ test('checkout without a matching lease or instance returns null, not an error',
   a.raw.destroy();
 });
 
+test('dynamic capability: acquire returns a claimToken; checkout validates + consumes it', async () => {
+  const socket = await openSocket();
+  const d = session(socket);
+  const reg = await d.request('register', { harness: 'opencode', instance: 'lab-a', capability: 'dynamic' });
+  d.identityId = reg.identityId;
+
+  const grant = await d.request('acquire', { model: 'small-dense' });
+  assert.equal(grant.status, 'granted');
+  assert.ok(typeof grant.claimToken === 'string' && grant.claimToken !== '');
+
+  // A dynamic identity needs the token: identity alone is a miss.
+  const noToken = await d.request('checkout', { model: 'small-dense', instance: 'lab-a' });
+  assert.equal(noToken.leaseId, null);
+
+  // The token admits, and is consumed.
+  const claim = await d.request('checkout', { model: 'small-dense', instance: 'lab-a', token: grant.claimToken });
+  assert.equal(claim.leaseId, grant.leaseId);
+  const again = await d.request('checkout', { model: 'small-dense', instance: 'lab-a', token: grant.claimToken });
+  assert.equal(again.leaseId, null);
+
+  await d.request('release', { leaseId: grant.leaseId });
+  d.raw.destroy();
+});
+
+test('static capability: acquire returns no claimToken; identity checkout still works', async () => {
+  const a = await registered(); // instance 'unit', static (default)
+  const grant = await a.request('acquire', { model: 'small-dense' });
+  assert.equal(grant.status, 'granted');
+  assert.equal(grant.claimToken, null);
+  const claim = await a.request('checkout', { model: 'small-dense', instance: 'unit' });
+  assert.equal(claim.leaseId, grant.leaseId);
+  await a.request('release', { leaseId: grant.leaseId });
+  a.raw.destroy();
+});
+
 test('wait long-poll times out with still-queued', async () => {
   const a = await registered();
   const b = await registered();
