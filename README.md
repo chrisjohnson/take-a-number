@@ -237,7 +237,7 @@ The box runs the daemon as a compose container in `chrisjohnson/local-ai-machine
 (`docker/docker-compose.yml`, image pinned there), as system user `tan`, with the
 queue config at `/etc/take-a-number/config.json`, audit at
 `/var/lib/take-a-number/audit`, and the dashboard behind Caddy at
-`https://tan.local-ai-machine.johnsonlab.dev` (token-gated). The queue config maps
+`https://take-a-number.local-ai-machine.johnsonlab.dev` (token-gated). The queue config maps
 live LiteLLM model names to GPU queues (`strix-apu` = APU, `r9700-egpu` = eGPU);
 the seed comes from `modelctl list` + LiteLLM `/model/info`. A second compose service
 (`tan-proxy`, same image) runs the admission proxy on `127.0.0.1:4140` in front of
