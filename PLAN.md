@@ -496,72 +496,88 @@ coexistence guard, degraded-mode pass-through, identity fields.
 
 ## 8. opencode plugin: `opencode-take-a-number` (in `chrisjohnson/take-a-number`, `plugins/opencode/`)
 
-opencode 1.18 plugin (`define({ id: 'opencode-take-a-number', setup })`), plain JS, zero deps
-(`tan-client` is a git-tag dependency of the package).
+> **Rewritten for opencode 1.18.34 (v0.5.0).** The original design assumed
+> `ctx.session.hook('http.request' | 'http.response', …)` — **those hooks do not exist in
+> 1.18.34.** The real `Hooks` interface has no `http.*` hooks and no response hook, so a plugin
+> cannot wrap the response body. The design below is the as-built one (see ticket 005).
 
-### 8.1 The gate
+Plain JS, zero runtime deps. Module shape (verified against `@opencode-ai/plugin@1.18.34`
+`index.d.ts`): default export `{ id, server }` where `server = (input, options) =>
+Promise<Hooks>`; path plugins must export `id`. Config key is `plugin: [spec, options]` tuples.
 
-```js
-ctx.session.hook('http.request', async (ev) => {
-  if (!gated(ev.model)) return ev                       // unmapped model → pass through
-  const lease = await gate.acquire({
-    model: ev.model.id, provider: ev.model.providerID,
-    kind: ev.kind, session: ev.sessionID, signal: <abort for this request>,
-  })
-  pending.set(ev.sessionID, push(pending.get(ev.sessionID) ?? [], lease))
-  return ev                                             // request proceeds only after grant
-})
-ctx.session.hook('http.response', async (ev) => {
-  const lease = pending.shift(ev.sessionID)             // FIFO per session
-  if (!lease) return ev
-  ev.response = wrapResponseBody(ev.response, () => lease.release())
-  return ev
-})
+### 8.1 The gate — `chat.headers` only
+
+The single hook:
+
+```ts
+"chat.headers"?: (
+  input:  { sessionID: string; agent: string; model: Model; provider: ProviderContext; message: UserMessage },
+  output: { headers: Record<string, string> },
+) => Promise<void>;
 ```
 
-- `gated(model)` — plugin config `queues: [{queue, models: [...]}]` mirrors the daemon's map
-  (the client sends the model name; the daemon remains authoritative — a model absent from the
-  daemon's map is `unlimited`, so a stale plugin config degrades to pass-through, never to a
-  brick). Config also: `enabled`, `sock`, `url`.
-- `wrapResponseBody` — wraps `response.body` (a `ReadableStream`) in a new stream that
-  `lease.release()`s on close, on `cancel(reason)`, and on read error. Non-stream bodies
-  (error JSON from a 4xx/5xx) release on full read. This makes the lease span the **entire
-  generation** (prefill + decode), not just time-to-first-token.
-- `kind` (`primary | compaction | title | generate`) and `sessionID` ride on the lease — the
-  daemon's audit and the dashboard attribute every opencode call to its session and purpose,
-  exactly the traceability requirement.
-- Per-session FIFO pending list: opencode runs one model call at a time per session, the list is
-  a safety net for overlap (forks/steer).
+It is async, so the plugin **awaits the grant inside the hook** before returning:
 
-### 8.2 Abort and retry
+```js
+'chat.headers': async (hookInput, output) => {
+  const headers = await gate({ model: hookInput.model.id, sessionID: hookInput.sessionID, agent: hookInput.agent })
+  output.headers = { ...output.headers, ...headers }   // {} = pass through
+}
+```
 
-- Request abort (user interrupt): opencode cancels the in-flight request; the wrapped body's
-  `cancel` releases the lease. If the request was still queued (abort during `http.request`'s
-  await), the plugin's `acquire` rejects via the abort signal ⇒ `cancel` waiter.
-- Failed request (4xx/5xx/network): `http.response` still fires for HTTP errors (the response
-  wrap releases). For *transport* failures where no response arrives, the `session.hook('retry')`
-  callback reaps the session's oldest pending lease (idempotent release). A final failure with no
-  retry leaves at most one dangling lease, reaped on the session's next `acquire` (per-acquire
-  sweep) — plus the daemon's connection-liveness reclamation and the dashboard's `force-release`
-  as backstops. Documented, bounded, self-healing.
+`gate` (pure, in `gate.mjs`, unit-testable with a fake client):
 
-### 8.3 Visibility in opencode
+1. Model absent from the plugin's `queues` mirror → `{}` (no daemon round-trip).
+2. `acquire({ model, kind: 'opencode', session, description })`:
+   - `degraded` → `{}` (fail-open).
+   - `unlimited` (stale map) → release the synthetic lease at once + `{}`.
+   - `granted` → `{ 'x-tan-client': instance, 'x-tan-claim': claimToken }`.
+   - `queued` → `waitFor` loop, bounded by `acquireTimeoutMs` (default 10 min); on expiry
+     `cancel(waiterId)` + `{}` (the call then hard-queues at the proxy — still gated,
+     unattributed).
+3. A grant without a claim token → `{}` (never half-identify).
+4. Any fault → `{}`. The plugin **never releases a grant**: the admission proxy checks the
+   lease out via the claim token and **releases it when the forwarded response completes or
+   aborts** (proxy-owned, exactly the dsh model). The one leak path — a granted lease whose
+   request never reaches the proxy — is bounded by the daemon's 30 s grant-TTL sweep.
 
-- **TUI status line** (separate TUI plugin entry in the same package, configured in `cli.json`
-  `plugins`): one line under the prompt, shown only while this process has an active or queued
-  lease: `gate: r9700-egpu 1/1 · you 12s · queue: 1 (dsh/web · 34s)`. Durable state via
-  `storage.store` so multiple TUI windows agree.
+### 8.2 Abort (known limitation)
+
+`chat.headers` input carries **no abort signal**, so the plugin cannot cancel its in-flight
+`acquire` when the user interrupts. Mitigations, in order: bounded acquire timeout; the proxy's
+abort handling for in-flight requests; the grant-TTL sweep for abandoned grants; and
+invariant 1 (process death ⇒ `identityDown` ⇒ waiters cancelled, leases released) for a hard
+kill. Accepted and documented; not over-engineered.
+
+### 8.3 Attribution
+
+`session` (the opencode `sessionID`), `kind: 'opencode'`, and `description: 'opencode ·
+<agent>'` ride on the lease (invariant 7: stored, echoed in `status`, audited verbatim). The
+instance name is per-process config (e.g. `opencode`, `lab-opencode`); the **claim token**, not
+the instance name, disambiguates concurrent calls from the same process.
+
+### 8.4 Visibility in opencode
+
 - **Daemon dashboard + audit:** the full cross-harness view and history (§5.4, §5.6).
+- **TUI status line: out of scope** (the dashboard already shows opencode's leases and waits).
 - **Chat-log injection: deliberately not done** (synthetic messages would enter model context;
-  opencode offers no client-only turn annotation slot). Recorded as the one visible-behavior
-  gap vs dsh, with the reason, in the package README.
+  opencode offers no client-only turn annotation slot).
 
-### 8.4 Tests
+### 8.5 Tests
 
-Unit (`node --test`, stubbed gate + stubbed `Response`/stream): wrap releases on close/cancel/
-error; unmapped pass-through; per-session pending FIFO; retry reaping; abort-during-queue ⇒
-cancel. Integration smoke: a T3 opencode session against a real daemon with a dsh lab instance
-holding the queue — the cross-harness serialization proof (also the rollout gate, §11 step 4).
+`node --test plugins/opencode/test/*.test.js`:
+
+- `gate.test.js` — pure unit tests against a fake client: unmapped pass-through, immediate
+  grant headers, queued→granted token, still-queued ticks, bounded-timeout cancel, degraded,
+  unlimited→release, null-token defense, acquire-refusal fail-open, cancelled waiter.
+- `integration.test.js` — gate against a real UDS daemon: acquire → claim token → proxy-style
+  `checkout` (one-time token), queueing behind a held slot, grant-TTL sweep of an unclaimed
+  grant.
+
+Lab rounds (ticket 005, Phase 1): standalone opencode on `big-moe` through the live proxy —
+fail-open, single admit, queueing behind a hold with whole-generation slot hold,
+one-token-per-grant, abort-while-queued, concurrent overlap, cross-harness FIFO, stale-grant
+sweep.
 
 ---
 

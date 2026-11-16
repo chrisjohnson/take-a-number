@@ -9,12 +9,12 @@ that is a hard constraint, not an aspiration. Node 20+ (developed on 22), ESM.
 ## Develop and test
 
 ```sh
-node --test test/*.test.js
+node --test test/*.test.js plugins/opencode/test/*.test.js
 ```
 
-Four suites: `queues.test.js` (pure state machine), `protocol.test.js` (real UDS server,
-raw-socket client), `client.test.js` (TanClient against a real server), plus the dashboard
-render verified via jsdom in a scratch dir (not committed). A live smoke run:
+Suites in `test/` (`queues.test.js` pure state machine, `protocol.test.js` real UDS server,
+`client.test.js` TanClient against a real server, plus proxy/admit/http) and
+`plugins/opencode/test/` (the opencode plugin gate: unit + real-UDS integration). A live smoke run:
 `node daemon/main.js --sock /tmp/tan.sock --tcp 127.0.0.1:4100 --config <cfg> --audit <dir>`,
 then `TAN_TCP=127.0.0.1:4100 node bin/tan status`.
 
