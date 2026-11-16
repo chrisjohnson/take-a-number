@@ -14,6 +14,7 @@ import { Queues } from './lib/queues.js';
 import { Audit } from './lib/audit.js';
 import { EventFeed, handleConnection, connectEvents } from './lib/protocol.js';
 import { httpHandler } from './lib/http.js';
+import { createMetrics } from './lib/metrics.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -126,6 +127,19 @@ const feed = new EventFeed();
 feed.setFrameBuilder(() => ({ type: 'status', asOf: Date.now(), uptimeMs: uptimeMs(), version: VERSION, ...queues.snapshot() }));
 connectEvents(queues, feed, audit);
 
+// Prometheus /metrics: observe the event stream (counters/histograms) and
+// read the snapshot at scrape time (gauges). Observing never gates the queue.
+const metrics = createMetrics({ queues, version: VERSION, startedAt });
+const baseOnEvent = queues.onEvent;
+queues.onEvent = (type, payload) => {
+  baseOnEvent(type, payload);
+  try {
+    metrics.observe(type, payload);
+  } catch {
+    // a metrics bug must never break the queue
+  }
+};
+
 // Free granted slots that were never claimed within the grant TTL (a static
 // client that never sent its request, or a dynamic client whose claim token
 // lapsed), and drop lapsed claim tokens. The Queues class itself is timer-free;
@@ -150,7 +164,7 @@ audit.record({ event: 'daemon_started', version: VERSION, pid: process.pid, queu
 
 // --- servers -----------------------------------------------------------------
 
-const handleHttp = httpHandler({ queues, audit, feed, version: VERSION, uptimeMs, persistConfig, dashboard: args.dashboard, authToken: args.authToken });
+const handleHttp = httpHandler({ queues, audit, feed, version: VERSION, uptimeMs, persistConfig, dashboard: args.dashboard, authToken: args.authToken, metrics });
 
 function routeConnection(socket, initialData) {
   const firstLine = initialData.toString('utf8').split('\r\n')[0].split('\n')[0];

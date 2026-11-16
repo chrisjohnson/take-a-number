@@ -9,6 +9,7 @@ import { Queues } from '../daemon/lib/queues.js';
 import { Audit } from '../daemon/lib/audit.js';
 import { EventFeed } from '../daemon/lib/protocol.js';
 import { httpHandler } from '../daemon/lib/http.js';
+import { createMetrics } from '../daemon/lib/metrics.js';
 
 const dir = mkdtempSync(join(tmpdir(), 'tan-http-'));
 const TOKEN = 'test-token-123';
@@ -27,6 +28,7 @@ function makeServer(authToken, port) {
   const audit = new Audit(join(dir, `audit-${port}`));
   const localFeed = new EventFeed();
   localFeed.setFrameBuilder(() => ({ type: 'status', ...queues.snapshot() }));
+  const metrics = createMetrics({ queues, version: 'test', startedAt: Date.now() });
   const handle = httpHandler({
     queues,
     audit,
@@ -36,6 +38,7 @@ function makeServer(authToken, port) {
     persistConfig: () => {},
     dashboard: join(import.meta.dirname, '..', 'dashboard'),
     authToken,
+    metrics,
   });
   const server = createServer((socket) => {
     socket.once('data', (chunk) => handle(socket, chunk.toString('utf8').split('\r\n')[0], chunk));
@@ -91,4 +94,19 @@ test('authed daemon keeps the dashboard shell and static assets open', async () 
 test('authed daemon gates mutating POSTs', async () => {
   const res = await fetch(`http://127.0.0.1:${authPort}/api/set-limits`, { method: 'POST', body: '{}' });
   assert.equal(res.status, 401);
+});
+
+test('open daemon serves /metrics in Prometheus text format', async () => {
+  const res = await fetch(`http://127.0.0.1:${openPort}/metrics`);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type') ?? '', /text\/plain; version=0\.0\.4/);
+  const body = await res.text();
+  assert.match(body, /tan_up\{version="test"\} 1/);
+  assert.match(body, /tan_queue_depth\{queue="gpu-a"\} 0/);
+});
+
+test('authed daemon keeps /metrics open (no token, like the dashboard shell)', async () => {
+  const res = await fetch(`http://127.0.0.1:${authPort}/metrics`);
+  assert.equal(res.status, 200);
+  assert.match(await res.text(), /tan_up\{version="test"\} 1/);
 });

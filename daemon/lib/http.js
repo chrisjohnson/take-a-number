@@ -1,11 +1,15 @@
-// The daemon's HTTP surface: the dashboard (GET /, /static/*) and the JSON API
-// (GET /api/status, GET /api/audit, GET /api/events NDJSON, POST /api/cancel,
-// POST /api/force-release, POST /api/set-limits).
+// The daemon's HTTP surface: the dashboard (GET /, /static/*), Prometheus
+// metrics (GET /metrics) and the JSON API (GET /api/status, GET /api/audit,
+// GET /api/events NDJSON, POST /api/cancel, POST /api/force-release,
+// POST /api/set-limits).
 //
 // Optional token auth: when `authToken` is non-empty, every route except the
-// dashboard shell and its static assets requires `?token=<authToken>`. The
-// shell stays open so the page's JS can read the token from the URL and carry
-// it on every API call.
+// dashboard shell, its static assets and /metrics requires
+// `?token=<authToken>`. The shell stays open so the page's JS can read the
+// token from the URL and carry it on every API call; /metrics exposes nothing
+// the dashboard already shows and the port is loopback-only by invariant, so
+// a plain static Prometheus scraper (which has nowhere to put a query token)
+// can read it.
 
 import { readFileSync, existsSync } from 'node:fs';
 import { timingSafeEqual } from 'node:crypto';
@@ -20,7 +24,7 @@ const MIME = {
   '.ico': 'image/x-icon',
 };
 
-export function httpHandler({ queues, audit, feed, version, uptimeMs, persistConfig, dashboard, authToken = '' }) {
+export function httpHandler({ queues, audit, feed, version, uptimeMs, persistConfig, dashboard, authToken = '', metrics = null }) {
   function readBody(head, maxBytes = 64 * 1024) {
     const headerEnd = head.indexOf('\r\n\r\n');
     if (headerEnd === -1) return Promise.reject(new Error('incomplete request head'));
@@ -65,7 +69,7 @@ export function httpHandler({ queues, audit, feed, version, uptimeMs, persistCon
     const url = new URL(target, 'http://localhost');
     const path = url.pathname;
     if (authToken !== '') {
-      const open = method === 'GET' && (path === '/' || path === '/index.html' || path.startsWith('/static/'));
+      const open = method === 'GET' && (path === '/' || path === '/index.html' || path === '/metrics' || path.startsWith('/static/'));
       if (!open && !authorized(url)) {
         return httpRespond(socket, '401 Unauthorized', 'application/json', JSON.stringify({ error: 'missing or invalid ?token=' }));
       }
@@ -74,6 +78,10 @@ export function httpHandler({ queues, audit, feed, version, uptimeMs, persistCon
       return httpRespond(socket, '204 No Content', 'text/plain', '');
     }
     try {
+      if (method === 'GET' && path === '/metrics') {
+        if (metrics === null) return httpRespond(socket, '404 Not Found', 'application/json', JSON.stringify({ error: 'not found' }));
+        return httpRespond(socket, '200 OK', 'text/plain; version=0.0.4; charset=utf-8', metrics.render());
+      }
       if (method === 'GET' && path === '/api/status') {
         return httpRespond(socket, '200 OK', 'application/json', JSON.stringify({ uptimeMs: uptimeMs(), version, ...queues.snapshot() }));
       }

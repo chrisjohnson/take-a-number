@@ -185,6 +185,36 @@ In the end-state the proxy fronts litellm's public port (Caddy points at the pro
 queueing mandatory for all external traffic. Until then it runs on its own port and clients
 opt in by pointing there.
 
+## Metrics (Prometheus)
+
+The daemon serves `GET /metrics` on its HTTP port (`127.0.0.1:4100` by default) in the
+Prometheus text exposition format, rendered by hand (no client library — the
+zero-runtime-dependency constraint). It is open like the dashboard shell: it exposes
+nothing the dashboard already shows, and the port is loopback-only by invariant.
+
+- **Gauges** (from a live `snapshot()` at scrape time): `tan_up{version}`,
+  `tan_uptime_seconds`, `tan_identities`, `tan_queue_depth{queue}`,
+  `tan_queue_limit{queue}` (0 = unlimited), `tan_queue_active{queue}`,
+  `tan_queue_longest_wait_seconds{queue}`,
+  `tan_queue_longest_lease_age_seconds{queue}`, `tan_identity_leases{identity}`,
+  `tan_identity_waiters{identity}`.
+- **Counters** (accumulated from the event stream; reset on daemon restart — query with
+  `increase()`/`rate()`): `tan_grants_total{queue,identity}`,
+  `tan_releases_total{queue,reason}`, `tan_cancellations_total{queue,reason}`,
+  `tan_rejections_total{queue,reason}`, `tan_identity_ups_total`. `queue` is `unmapped`
+  for unmapped-model traffic; `identity` is the instance name.
+- **Histograms**: `tan_wait_seconds{queue}` (time queued before a grant) and
+  `tan_run_seconds{queue}` (time a held lease ran).
+
+A minimal Prometheus scrape job:
+
+```yaml
+  - job_name: "take-a-number"
+    metrics_path: "/metrics"
+    static_configs:
+      - targets: ["localhost:4100"]
+```
+
 ## Running as a container
 
 ```sh
