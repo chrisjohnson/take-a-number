@@ -17,7 +17,7 @@ import { httpHandler } from './lib/http.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const VERSION = '0.2.0';
+const VERSION = '0.2.1';
 
 function parseArgs(argv) {
   const args = {
@@ -27,6 +27,7 @@ function parseArgs(argv) {
     audit: '/var/lib/take-a-number/audit',
     dashboard: join(__dirname, '..', 'dashboard'),
     authToken: process.env.TAN_AUTH_TOKEN ?? '',
+    allowNonLoopback: process.env.TAN_ALLOW_NON_LOOPBACK === '1',
     version: false,
     help: false,
   };
@@ -39,6 +40,7 @@ function parseArgs(argv) {
       case '--audit': args.audit = argv[++i]; break;
       case '--dashboard': args.dashboard = argv[++i]; break;
       case '--auth-token': args.authToken = argv[++i]; break;
+      case '--allow-non-loopback': args.allowNonLoopback = true; break;
       case '--version': args.version = true; break;
       case '--help': args.help = true; break;
       default:
@@ -62,6 +64,12 @@ usage: node daemon/main.js [--sock PATH] [--tcp HOST:PORT] [--config PATH] [--au
                      empty = open, for local development). The dashboard page
                      itself stays open so its JS can read the token from the
                      URL and carry it on every API call.
+  --allow-non-loopback  permit --tcp on a non-loopback address. Containerized
+                     deployments only: docker port publishing forwards to the
+                     container's bridge IP, which a loopback bind never sees.
+                     The isolation then comes from the host-side publish
+                     (127.0.0.1:HOSTPORT:4100) plus the container's own
+                     network namespace. Never use this for a native service.
 `;
 
 const args = parseArgs(process.argv.slice(2));
@@ -144,9 +152,12 @@ const { host, port } = (() => {
   const [h, p] = args.tcp.split(':');
   return { host: h ?? '127.0.0.1', port: Number(p) };
 })();
-if (host !== '127.0.0.1' && host !== 'localhost') {
-  process.stderr.write('take-a-number: TCP must bind loopback (127.0.0.1); refusing\n');
+if (host !== '127.0.0.1' && host !== 'localhost' && !args.allowNonLoopback) {
+  process.stderr.write('take-a-number: TCP must bind loopback (127.0.0.1); refusing (pass --allow-non-loopback for containerized deployments)\n');
   process.exit(2);
+}
+if (host !== '127.0.0.1' && host !== 'localhost') {
+  process.stderr.write('take-a-number: warning: TCP bound to non-loopback ' + host + ' (--allow-non-loopback)\n');
 }
 
 const tcpServer = createServer((socket) => {

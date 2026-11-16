@@ -120,6 +120,12 @@ The daemon's defaults are the container's contract: UDS at
 publish the port to the host loopback (`127.0.0.1:HOSTPORT:4100`) and front it
 with your own reverse proxy for external access.
 
+- The daemon's native default binds `127.0.0.1` only (it refuses anything
+  else). The container image overrides this: it binds `0.0.0.0:4100` inside
+  the container with `--allow-non-loopback`, because docker port publishing
+  forwards to the container's bridge IP, which a loopback bind never sees.
+  The isolation is the host-side publish (`127.0.0.1:HOSTPORT:4100`) plus the
+  container's network namespace.
 - Run the container as the uid that owns the mounted socket/audit dirs (the
   image defaults to the `node` user; set `user:` to your own uid:gid).
 - `TAN_AUTH_TOKEN` (env or `--auth-token`): when set, every `/api/*` route

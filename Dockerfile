@@ -13,8 +13,10 @@ USER node
 
 # Defaults (override with command flags or env):
 #   UDS  /run/take-a-number/tan.sock      (mount a host dir at this path)
-#   TCP  127.0.0.1:4100                   (publish 127.0.0.1:HOSTPORT:4100)
+#   TCP  0.0.0.0:4100 inside the container — docker port publishing forwards
+#        to the container's bridge IP, which a loopback bind never sees; the
+#        isolation is the host-side publish (127.0.0.1:HOSTPORT:4100).
 #   config /etc/take-a-number/config.json (mount read-write)
 #   audit  /var/lib/take-a-number/audit   (mount a host dir)
 #   TAN_AUTH_TOKEN                         (optional ?token= gate on the API)
-CMD ["node", "daemon/main.js"]
+CMD ["node", "daemon/main.js", "--tcp", "0.0.0.0:4100", "--allow-non-loopback"]
