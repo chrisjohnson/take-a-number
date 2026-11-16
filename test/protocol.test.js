@@ -314,6 +314,27 @@ test('event feed sends an initial snapshot on subscribe', () => {
   unsubscribe();
 });
 
+test('keepalive gap never exceeds keepAliveMs after the last line (re-arm regression)', async () => {
+  const feed2 = new EventFeed({ keepAliveMs: 60 });
+  feed2.setFrameBuilder(() => ({ type: 'status', at: Date.now() }));
+  const times = [];
+  const unsubscribe = feed2.subscribe(() => times.push(Date.now()));
+  // Let the first keepalive fire, then write a line just after it. The old
+  // fixed-interval design (check only on its own ticks) could then go silent
+  // for ~2x keepAliveMs — longer than the dashboard's 20s stall timeout —
+  // causing NS_BINDING_ABORTED reconnect loops.
+  await new Promise((r) => setTimeout(r, 70));
+  feed2.notify();
+  feed2.flush();
+  await new Promise((r) => setTimeout(r, 250));
+  unsubscribe();
+  feed2.close();
+  assert.ok(times.length >= 4, `expected several lines, got ${times.length}`);
+  let maxGap = 0;
+  for (let i = 1; i < times.length; i += 1) maxGap = Math.max(maxGap, times[i] - times[i - 1]);
+  assert.ok(maxGap <= 100, `idle gap ${maxGap}ms exceeds keepAliveMs + slack`);
+});
+
 test('events subscription may open anonymously (no identity churn)', async () => {
   const fs = await import('node:fs');
   const auditFile = () => join(dir, 'audit', fs.readdirSync(join(dir, 'audit')).filter((f) => f.endsWith('.jsonl')).at(-1));

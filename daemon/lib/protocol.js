@@ -10,7 +10,8 @@ const COALESCE_MS = 150;
 const KEEPALIVE_MS = 15000;
 
 export class EventFeed {
-  constructor() {
+  constructor({ keepAliveMs = KEEPALIVE_MS } = {}) {
+    this.keepAliveMs = keepAliveMs;
     this.subscribers = new Set();
     this.dirty = false;
     this.timer = null;
@@ -47,7 +48,7 @@ export class EventFeed {
     for (const sub of this.subscribers) {
       try {
         sub.write(line);
-        sub.last = Date.now();
+        sub.arm();
       } catch {
         // socket gone; cleanup happens on close
       }
@@ -56,7 +57,28 @@ export class EventFeed {
 
   /** Returns an unsubscribe function. */
   subscribe(write) {
-    const sub = { write, last: Date.now() };
+    const keepAliveMs = this.keepAliveMs;
+    const sub = {
+      write,
+      timer: null,
+      // Re-armable idle timer: the keepalive fires keepAliveMs after the LAST
+      // line written, so the gap between lines never exceeds keepAliveMs. A
+      // fixed interval that only checks on its own ticks could idle up to
+      // 2x keepAliveMs after a late event — longer than the dashboard's stall
+      // timeout — causing abort/reconnect loops (NS_BINDING_ABORTED).
+      arm() {
+        if (sub.timer !== null) clearTimeout(sub.timer);
+        sub.timer = setTimeout(() => {
+          try {
+            write(`${JSON.stringify({ type: 'keepalive', at: Date.now() })}\n`);
+          } catch {
+            // socket gone; cleanup happens on close
+          }
+          sub.arm();
+        }, keepAliveMs);
+        if (typeof sub.timer.unref === 'function') sub.timer.unref();
+      },
+    };
     this.subscribers.add(sub);
     // Initial snapshot: subscribers see the current state immediately instead
     // of waiting for the next event — a quiet machine must not render a
@@ -66,32 +88,22 @@ export class EventFeed {
         const frame = this.frameBuilder();
         if (frame !== null) {
           write(JSON.stringify(frame) + '\n');
-          sub.last = Date.now();
         }
       } catch {
         // a builder failure surfaces on the next flush
       }
     }
-    const keepAlive = setInterval(() => {
-      if (Date.now() - sub.last >= KEEPALIVE_MS) {
-        try {
-          write(`${JSON.stringify({ type: 'keepalive', at: Date.now() })}\n`);
-          sub.last = Date.now();
-        } catch {
-          // gone
-        }
-      }
-    }, KEEPALIVE_MS);
-    if (typeof keepAlive.unref === 'function') keepAlive.unref();
-    sub.keepAlive = keepAlive;
+    sub.arm();
     return () => {
       this.subscribers.delete(sub);
-      clearInterval(keepAlive);
+      if (sub.timer !== null) clearTimeout(sub.timer);
     };
   }
 
   close() {
-    for (const sub of this.subscribers) clearInterval(sub.keepAlive);
+    for (const sub of this.subscribers) {
+      if (sub.timer !== null) clearTimeout(sub.timer);
+    }
     this.subscribers.clear();
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = null;
