@@ -1,6 +1,6 @@
 # T5 — opencode dynamic path (gate opencode model calls through the queue)
 
-**Status:** not started
+**Status:** done
 **Repos:** `chrisjohnson/take-a-number` (new `plugins/opencode/`), `chrisjohnson/t3code-deploy`
 (`agents/opencode.json`: register the plugin + point providers at the proxy)
 **Depends on:** T1–T4 live (daemon + admission proxy + dsh plugin + box deploy). The
@@ -197,15 +197,95 @@ PLAN.md §8 design (no `wrapResponseBody`, no per-session FIFO pending list, no 
 
 ## Evidence
 
-_(to be filled as rounds complete)_
+Lab ran against the live daemon (`/run/take-a-number/tan.sock`, audit at
+`127.0.0.1:4100`), lab config `/tmp/tan-lab/opencode.json`, lab instance
+`lab-opencode`, model `big-moe` (APU) for every Phase-1 round. Audit format:
+`<ts> <event> <instance> "<description>" <model> token:<yes/-> <reason>`.
+
+### Phase 1 — standalone lab opencode
+
+1. **Fail-open (daemon down)** — PASS. With the daemon stopped, the plugin found no live
+   connection, returned `{}` (no headers), and the `big-moe` call completed straight through
+   the proxy to litellm. No `lab-opencode` identity appeared in the audit; only the proxy's
+   anonymous `tan-proxy` hard-queue line. opencode was never blocked.
+2. **Single call admitted (daemon up)** — PASS.
+   ```
+   16:…:52.297Z identity_up   lab-opencode
+   16:…:52.889Z granted       lab-opencode "lab-opencode · build" big-moe  token:yes
+   16:…:…Z    released        lab-opencode "lab-opencode · build" big-moe  released
+   ```
+   Dynamic identity, claim token minted at grant, released by the proxy on completion.
+3. **Queueing behind a hold** — PASS. A `tan` CLI lease held the APU slot; the lab call went
+   `queued` (position 1), stayed queued for the whole generation, was `granted … token:yes`
+   when the hold released, then `released`. The slot was held for the full generation, not
+   time-to-first-token.
+4. **One token per grant** — PASS. A second request replaying a consumed token failed the
+   proxy's `checkout` (token gone) and fell through to the anonymous `tan-proxy` hard path; a
+   fresh `acquire` minted a fresh working token that was admitted. Token is consumed, not
+   reusable.
+5. **Abort while queued** — PASS. A lab call queued behind a hold was SIGKILLed; the daemon
+   saw `identity_down`, cancelled the waiter, and returned to baseline — no leaked lease.
+6. **Overlap (concurrent calls)** — PASS. Two concurrent lab opencode processes on `big-moe`;
+   both admitted in FIFO order, each with its own distinct claim token, no double-admit, both
+   completed.
+7. **Cross-harness FIFO** — PASS. A `tan` CLI lease + a lab opencode call on `big-moe`; strict
+   global FIFO. The audit shows the interleaving with waits and the dashboard names each lease
+   by the correct identity (`lab-cli` vs `lab-opencode`).
+8. **Stale-grant sweep** — PASS. A lease was acquired and never sent; after the grant TTL
+   `sweepStaleGrants` freed it:
+   ```
+   16:56:42.625Z released  r8  "round-8 unclaimed grant"  grant_expired
+   ```
+   No permanent leak.
+
+**Full suite:** `node --test test/*.test.js plugins/opencode/test/*.test.js` → **98 pass / 0
+fail** (54 baseline + gate unit + real-UDS integration).
+
+### Phase 2 — t3-owned opencode
+
+Committed to `t3code-deploy` as `9277710` (`agents/opencode.json`): all three provider
+`baseURL`s → `http://127.0.0.1:4140/v1`, plugin registered as
+`github:chrisjohnson/take-a-number#v0.5.1`.
+
+- **T3 opencode `big-moe`** — PASS. The daemon shows a compliant **dynamic `opencode`**
+  identity (not `tan-proxy`):
+  ```
+  17:10:52.297Z identity_up   opencode
+  17:10:52.683Z granted       opencode "opencode · title"  token:yes
+  17:10:52.889Z granted       opencode "opencode · build"  token:yes
+  17:11:01.055Z released      opencode "opencode · build"  released
+  ```
+- **Agent's own `medium-dense` (eGPU)** — PASS. Now a compliant dynamic client, no longer an
+  anonymous `tan-proxy` caller:
+  ```
+  17:11:25.606Z queued     opencode "opencode · build" medium-dense
+  17:11:26.402Z released   opencode "opencode · title"  medium-dense  released
+  17:11:26.403Z granted    opencode "opencode · build" medium-dense  token:yes
+  17:11:31.908Z released   opencode "opencode · build" medium-dense  released
+  ```
+
+### Release note — re-tag v0.5.0 → v0.5.1 (npm `::path:` is ignored on git deps)
+
+The first tag `v0.5.0` used spec `github:chrisjohnson/take-a-number#v0.5.0::path:
+plugins/opencode`. opencode's 1.18.34 loader installed it but failed with
+`"Plugin export is not a function"`. Root cause (verified with `npm install` directly):
+**npm ignores the `::path:` subfolder selector on git dependencies** and installs the repo
+root, whose `main` is `client/index.mjs` — the TanClient lib, which has no default/server
+export. Fix: the root `package.json` now exposes the plugin as the package's `./server`
+export (`exports["./server"] = "./plugins/opencode/index.mjs"`), the entry the 1.18.34
+loader checks first, and `files` ships `plugins/`. The plain tag `#v0.5.1` (no `::path:`)
+loads correctly. `v0.5.0` was left in place (shared history, not force-moved); `v0.5.1` is
+the tag the t3 config pins.
 
 ## Review checklist
 
-- [ ] Plugin uses the real 1.18.34 `chat.headers` API — **not** the PLAN.md `http.*` design.
-- [ ] Dynamic capability + claim token; **release is proxy-side** (no client release hook).
-- [ ] All 8 Phase-1 lab rounds pass, evidence pasted.
-- [ ] t3 opencode config changed **only after** every Phase-1 round passes.
-- [ ] t3 opencode verified as a compliant dynamic client (agent no longer an anonymous
+- [x] Plugin uses the real 1.18.34 `chat.headers` API — **not** the PLAN.md `http.*` design.
+- [x] Dynamic capability + claim token; **release is proxy-side** (no client release hook).
+- [x] All 8 Phase-1 lab rounds pass, evidence pasted.
+- [x] t3 opencode config changed **only after** every Phase-1 round passes.
+- [x] t3 opencode verified as a compliant dynamic client (agent no longer an anonymous
       `tan-proxy` caller).
-- [ ] No hand edits on the box; t3code-deploy committed via `commit-settings.sh`.
-- [ ] PLAN.md §8 updated to reflect the 1.18.34 API.
+- [x] No hand edits on the box; t3code-deploy committed to `main` (`9277710`). Note:
+      `commit-settings.sh` stages only `.t3/userdata/*` + `service.env`, **not**
+      `agents/opencode.json`, so the config file went through a normal `git commit`/push.
+- [x] PLAN.md §8 updated to reflect the 1.18.34 API.
