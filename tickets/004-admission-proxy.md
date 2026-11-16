@@ -1,6 +1,9 @@
 # T4 — Admission proxy in front of litellm (soft + hard entry)
 
-**Status:** in progress
+**Status:** done (proxy live on `127.0.0.1:4140` since 2026-11-15; deliverable 6 — the
+standalone opencode lab — was executed as T5's Phase 1 and went further: opencode is now a
+compliant dynamic client. Remaining out-of-scope follow-ups: point litellm's Caddy route at
+the proxy for mandatory external queueing)
 **Repos:** `chrisjohnson/take-a-number` (proxy + daemon `checkout`), `chrisjohnson/dsh-plugins`
 (plugin: instance token + lease-aware gate), `chrisjohnson/dsh-deploy` (pin + provider header),
 `chrisjohnson/local-ai-machine` (compose service for the proxy, new port)
