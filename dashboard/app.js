@@ -22,6 +22,8 @@
   var STALL_MS = 20000;
   var FALLBACK_POLL_MS = 2000;
   var GHOST_TTL_MS = 900;
+  var TICK_MS = 500;          // local-clock refresh of the displayed durations
+  var SIM_TICK_MS = 1000;     // how often the simulator mints a new frame
   var TONES = ['mc-tone-0', 'mc-tone-1', 'mc-tone-2', 'mc-tone-3'];
   var KPI_TONES = ['mc-tone-blue', 'mc-tone-violet', 'mc-tone-teal', 'mc-tone-amber'];
 
@@ -39,6 +41,19 @@
     var m = Math.floor(s / 60);
     if (m < 60) return m + 'm ' + (s % 60) + 's';
     return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+  }
+
+  // A frame carries durations as of the instant it was produced. Between frames the
+  // page ticks them with its own clock, so the timers move in realtime without a
+  // realtime connection. sim.js owns the arithmetic (and its tests); fall back to
+  // the same one-liner if the module has not been served.
+  function tickValue(baseMs, baseAt, now) {
+    if (window.TAN_SIM && typeof window.TAN_SIM.tickValue === 'function') {
+      return window.TAN_SIM.tickValue(baseMs, baseAt, now);
+    }
+    var base = typeof baseMs === 'number' && isFinite(baseMs) ? baseMs : 0;
+    var delta = now - baseAt;
+    return base + (delta > 0 ? delta : 0);
   }
 
   function esc(value) {
@@ -300,16 +315,17 @@
   // --- top-level render ------------------------------------------------------------
 
   var lastFrame = null;
+  var receivedAt = 0; // Date.now() at the instant lastFrame was rendered
 
   function renderKpis(frame) {
     var kpis = [
-      { value: frame.totals.active, label: 'active calls', hint: 'leases held right now', tone: KPI_TONES[0] },
-      { value: frame.totals.waiting, label: 'waiting', hint: 'in FIFO queues', tone: KPI_TONES[1] },
-      { value: (frame.identities || []).length, label: 'identities', hint: 'connected processes', tone: KPI_TONES[2] },
-      { value: fmtMs(frame.uptimeMs), label: 'daemon up', hint: 'since last restart', tone: KPI_TONES[3] },
+      { key: 'active', value: frame.totals.active, label: 'active calls', hint: 'leases held right now', tone: KPI_TONES[0] },
+      { key: 'waiting', value: frame.totals.waiting, label: 'waiting', hint: 'in FIFO queues', tone: KPI_TONES[1] },
+      { key: 'identities', value: (frame.identities || []).length, label: 'identities', hint: 'connected processes', tone: KPI_TONES[2] },
+      { key: 'uptime', value: fmtMs(frame.uptimeMs), label: 'daemon up', hint: 'since last restart', tone: KPI_TONES[3] },
     ];
     document.getElementById('mc-kpis').innerHTML = kpis.map(function (k) {
-      return '<div class="mc-kpi ' + k.tone + '"><div class="mc-kpi-value">' + esc(k.value) + '</div>' +
+      return '<div class="mc-kpi ' + k.tone + '"><div class="mc-kpi-value" data-kpi="' + k.key + '">' + esc(k.value) + '</div>' +
         '<div class="mc-kpi-label">' + esc(k.label) + '</div><div class="mc-kpi-hint">' + esc(k.hint) + '</div></div>';
     }).join('');
   }
@@ -326,8 +342,9 @@
     }).join('');
   }
 
-  function render(frame) {
+  function render(frame, meta) {
     lastFrame = frame;
+    receivedAt = Date.now();
     renderKpis(frame);
     renderIdentities(frame);
     var seen = new Set();
@@ -343,16 +360,133 @@
       }
     });
     var sub = document.getElementById('mc-sub');
-    sub.textContent = 'model-call queue · one FIFO per GPU · ' + frame.queues.length + ' queue' + (frame.queues.length === 1 ? '' : 's') + ' · v' + (frame.version || '?');
+    sub.textContent = 'model-call queue · one FIFO per GPU · ' + frame.queues.length + ' queue' + (frame.queues.length === 1 ? '' : 's') + ' · v' + (frame.version || '?') + ((meta && meta.simulated) ? ' · simulated' : '');
+    ensureTick();
+  }
+
+  // --- local clock tick ---------------------------------------------------------------
+  // Between frames, only the durations change. This rewrites just those text nodes —
+  // no reconciliation, no FLIP, no graph rebuild — so the timers move in realtime
+  // whether or not a frame arrived in the last second.
+
+  var tickTimer = null;
+
+  function tickList(listEl, items, idField, timeField) {
+    if (!listEl || !items) return;
+    var byId = Object.create(null);
+    for (var i = 0; i < items.length; i += 1) byId[items[i][idField]] = items[i][timeField];
+    var children = listEl.children;
+    for (var j = 0; j < children.length; j += 1) {
+      var node = children[j];
+      var key = node.dataset && node.dataset.flip; // ghosts drop theirs, so they freeze
+      if (!key || !(key in byId)) continue;
+      var span = node.querySelector('.mc-sc-time');
+      if (!span) continue;
+      var next = fmtMs(tickValue(byId[key], receivedAt, Date.now()));
+      if (span.textContent !== next) span.textContent = next;
+    }
+  }
+
+  function tickTimes() {
+    if (!lastFrame) return;
+    var now = Date.now();
+    var up = document.querySelector('#mc-kpis [data-kpi="uptime"]');
+    if (up && typeof lastFrame.uptimeMs === 'number') {
+      up.textContent = fmtMs(tickValue(lastFrame.uptimeMs, receivedAt, now));
+    }
+    lastFrame.queues.forEach(function (queue) {
+      var card = queueCards.get(queue.id);
+      if (!card) return;
+      tickList(card.activeEl, queue.active, 'leaseId', 'elapsedMs');
+      tickList(card.queueEl, queue.waiters, 'waiterId', 'waitedMs');
+    });
+  }
+
+  function ensureTick() {
+    if (tickTimer === null && !document.hidden) tickTimer = window.setInterval(tickTimes, TICK_MS);
+  }
+
+  function stopTick() {
+    if (tickTimer !== null) { window.clearInterval(tickTimer); tickTimer = null; }
+  }
+
+  // --- simulated feed ---------------------------------------------------------------
+  // sim.js mints daemon-shaped frames locally. Two ways in: the Simulate button
+  // (manual — detaches the feed and drives the page from the simulator) and an
+  // offline feed (automatic — the simulator covers the gap and steps aside the
+  // moment a real frame arrives again).
+
+  var simMode = null; // null | 'manual' | 'auto'
+  var simTimer = null;
+  var sim = null;
+  var simButton = document.getElementById('mc-sim-btn');
+
+  function simReady() {
+    return !!(window.TAN_SIM && typeof window.TAN_SIM.createSimulator === 'function');
+  }
+
+  function paintSimButton() {
+    if (!simButton) return;
+    var on = simMode !== null;
+    simButton.setAttribute('aria-pressed', on ? 'true' : 'false');
+    simButton.classList.toggle('is-on', on);
+    simButton.textContent = on ? 'Stop simulating' : 'Simulate';
+    simButton.title = on
+      ? 'Frames are being generated locally — click to return to the live feed'
+      : 'Drive the dashboard from a locally simulated feed (no daemon needed)';
+  }
+
+  function paintSim() {
+    if (!sim) return;
+    render(sim.tick(Date.now()), { simulated: true });
+  }
+
+  function startSim(mode) {
+    if (simMode !== null || !simReady()) return;
+    simMode = mode;
+    sim = window.TAN_SIM.createSimulator({ now: Date.now(), seed: (Date.now() % 100000) + 1 });
+    if (mode === 'manual') detachFeed();
+    paintSimButton();
+    paintSim();
+    simTimer = window.setInterval(paintSim, SIM_TICK_MS);
+    setStatus('simulated');
+  }
+
+  function stopSim() {
+    if (simTimer !== null) { window.clearInterval(simTimer); simTimer = null; }
+    var wasManual = simMode === 'manual';
+    simMode = null;
+    sim = null;
+    paintSimButton();
+    return wasManual;
+  }
+
+  function toggleSim() {
+    if (simMode === 'manual') {
+      if (stopSim()) resumeFeed();
+    } else if (simMode === 'auto') {
+      simMode = 'manual'; // take ownership of a simulator the outage already started
+      detachFeed();
+      paintSimButton();
+    } else {
+      startSim('manual');
+    }
   }
 
   function setStatus(mode) {
+    if (simMode !== null && mode !== 'simulated') return; // the simulator owns the badge while it runs
     var el = document.getElementById('mc-status');
     var text = document.getElementById('mc-status-text');
-    el.classList.remove('off', 'warn');
+    el.classList.remove('off', 'warn', 'sim');
     if (mode === 'stream') text.textContent = 'live';
     else if (mode === 'poll') { el.classList.add('warn'); text.textContent = 'polling'; }
-    else { el.classList.add('off'); text.textContent = 'offline'; }
+    else if (mode === 'simulated') { el.classList.add('sim'); text.textContent = 'simulated'; }
+    else {
+      el.classList.add('off');
+      text.textContent = 'offline';
+      // no daemon, no data: simulate rather than show a dead page
+      if (simMode === null && simReady()) startSim('auto');
+    }
   }
 
   // --- feed -------------------------------------------------------------------------
@@ -373,6 +507,29 @@
 
   function stopPoll() {
     if (pollTimer !== null) { window.clearInterval(pollTimer); pollTimer = null; }
+  }
+
+  // The Simulate toggle takes the page away from the feed entirely: bump the
+  // generation so in-flight retries and backoff timers invalidate themselves,
+  // abort the stream, and stop polling. resumeFeed() re-opens the stream; the
+  // visibility listener registered by start() stays in place.
+  function detachFeed() {
+    generation += 1;
+    controllers.forEach(function (c) { try { c.abort(); } catch (e) { /* closed */ } });
+    controllers.clear();
+    stopPoll();
+    if (stallTimer !== null) { window.clearTimeout(stallTimer); stallTimer = null; }
+    failures = 0;
+  }
+
+  function resumeFeed() {
+    failures = 0;
+    openStream();
+  }
+
+  // A real frame ends an automatic simulation; the badge hands back before render.
+  function noteRealFrame() {
+    if (simMode === 'auto') stopSim();
   }
 
   function fallBack() {
@@ -399,6 +556,8 @@
     }).then(function (frame) {
       if (pollTimer !== null) { stopPoll(); }
       failures = 0;
+      noteRealFrame();
+      setStatus('poll'); // a recovered feed must not leave a stale badge behind
       render(frame);
     }).catch(function () {
       setStatus('offline');
@@ -432,6 +591,7 @@
             try { frame = JSON.parse(line); } catch (e) { continue; }
             if (frame.type === 'keepalive') continue;
             failures = 0;
+            noteRealFrame();
             setStatus('stream');
             render(frame);
           }
@@ -449,13 +609,16 @@
     openStream();
     document.addEventListener('visibilitychange', function onVis() {
       if (document.hidden) {
+        stopTick();
         generation += 1;
         controllers.forEach(function (c) { try { c.abort(); } catch (e) { /* closed */ } });
         controllers.clear();
         stopPoll();
         if (stallTimer !== null) window.clearTimeout(stallTimer);
-      } else if (pollTimer === null && controllers.size === 0) {
-        start();
+      } else {
+        tickTimes();
+        ensureTick();
+        if (simMode !== 'manual' && pollTimer === null && controllers.size === 0) start();
       }
     });
   }
@@ -523,6 +686,11 @@
       .then(function () { modal.hidden = true; })
       .catch(function () {});
   });
+
+  // --- simulate toggle ------------------------------------------------------------------
+
+  if (simButton) simButton.addEventListener('click', toggleSim);
+  paintSimButton();
 
   start();
 })();

@@ -49,7 +49,11 @@ serialization point out of the harnesses and into one small daemon that owns the
 - **`dashboard/`** — static, zero-dependency dashboard served by the daemon at `GET /`.
   Visual language ported from dsh-model-capacity's Activity UI (KPI cards, per-queue
   capacity bars, 60 s busy graphs, breathing live cards, enter/poof/FLIP animations,
-  reduced-motion support, light + dark).
+  reduced-motion support, light + dark). Every timer on the page is advanced by the
+  browser's own clock between frames, so the numbers move in realtime without needing a
+  realtime connection. `dashboard/sim.js` mints daemon-shaped frames locally — on demand
+  from the **Simulate** button, or automatically the moment the feed goes offline — so the
+  board is never a dead page, and it can be demoed with no daemon running at all.
 
 ## Protocol
 
@@ -301,7 +305,7 @@ carries a per-instance `x-tan-client` token so its calls take the compliant path
 | `proxy/main.js`        | admission proxy HTTP entrypoint                             |
 | `proxy/lib/admit.js`   | pure per-request admission decision (unit-testable)         |
 | `bin/tan`              | CLI                                                         |
-| `dashboard/`           | index.html, style.css, app.js (zero deps)                   |
+| `dashboard/`           | index.html, style.css, app.js, sim.js (zero deps)           |
 | `test/`                | node:test suites                                            |
 | `tickets/`             | the 3-ticket work plan                                      |
 | `PLAN.md`              | architecture reference                                      |
