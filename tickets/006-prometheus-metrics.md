@@ -1,9 +1,8 @@
 # T6 — Prometheus /metrics on the daemon + Grafana dashboard
 
-**Status:** in progress — daemon + box config deployed and verified; **pending the
-user's image swap** (TAN_TAG bump + `compose up -d`, outside the agent's docker
-scope). After that, the Prometheus target flips `up` and the Grafana panels get
-data.
+**Status:** done (2026-11-16). Daemon `/metrics` live, Prometheus target `up`
+and ingesting, Grafana dashboard populated. The box is on the v0.7.0 image
+(`2eaf9d5`), which also carries the lease watchdog (ticket: docs/roadmap.md §6).
 **Repos:** `chrisjohnson/take-a-number` (daemon `/metrics`), `chrisjohnson/local-ai-machine`
 (prometheus scrape job, Grafana dashboard JSON, knowledge note)
 **Depends on:** T1–T5 live (daemon on `127.0.0.1:4100`; the box already runs Prometheus
@@ -156,9 +155,10 @@ fail** (7 new `metrics.test.js` renderer cases + 2 `/metrics` HTTP e2e cases).
 - Grafana file-provisioner picked up the new dashboard JSON (30 s refresh); no
   provisioning errors in the container log.
 
-### Pending user step (outside the agent's docker scope — no `up`/`run`)
+### User step (DONE 2026-11-16)
 
-On the box, in the `docker/` checkout:
+Completed: the box moved to the v0.7.0 image (`2eaf9d5`); the Prometheus target
+flipped `up` and the Grafana dashboard is populated. The command that was run:
 
 ```sh
 # 1. point the pin at v0.6.0
@@ -178,7 +178,8 @@ has live panels.
 - [x] `Queues` state machine unchanged (metrics observe, never gate).
 - [x] Counters/histograms from the event stream; gauges from `snapshot()` at scrape time.
 - [x] `/metrics` loopback-only, token-exempt like the dashboard shell.
-- [x] Unit + e2e tests green; full suite green (107 pass).
-- [ ] Prometheus target `up`; Grafana dashboard renders live panels — **pending the
-      image swap above** (target is registered and `down`/404 on the old image, as expected).
+- [x] Unit + e2e tests green; full suite green (111 pass after the v0.7.0 additions).
+- [x] Prometheus target `up` and ingesting (`tan_up = 1`, `sum(tan_queue_active)` /
+      `sum(tan_queue_depth)` return data); Grafana dashboard `take-a-number — model-call
+      queue` populated. Verified 2026-11-16 after the box moved to the v0.7.0 image.
 - [x] Deployed through git only (take-a-number main + local-ai-machine `deploy.sh`).
