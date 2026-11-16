@@ -433,11 +433,7 @@ export async function withLease(tan, fields, fn, { signal, onWait = () => {} } =
   if (signal?.aborted) throw new TanError('ABORTED', 'aborted before acquiring');
   if (result.status === 'degraded') return fn(null);
   if (result.status === 'granted') {
-    try {
-      return await fn(result.leaseId);
-    } finally {
-      tan.release(result.leaseId);
-    }
+    return runUnderLease(fn, result.leaseId, () => tan.release(result.leaseId));
   }
   onWait({ waiterId: result.waiterId, queue: result.queue, position: result.position });
   let granted = null;
@@ -479,9 +475,36 @@ export async function withLease(tan, fields, fn, { signal, onWait = () => {} } =
     tan.release(granted);
     throw new TanError('ABORTED', 'aborted at grant');
   }
+  return runUnderLease(fn, granted, () => tan.release(granted));
+}
+
+/**
+ * Run `fn(leaseId)` while holding the lease.
+ *
+ * If `fn` returns an async iterable (a model-call stream), the lease is held
+ * until that stream is fully consumed, aborted, or errors — NOT just until the
+ * stream object is created. This is the fix for the early-release bug: a model
+ * call's stream is created instantly and then iterated over the whole generation,
+ * so releasing when the stream object exists would free the lease before the
+ * first token and let the admission proxy hard-queue the request.
+ *
+ * Otherwise (a plain promise of work) the lease is held until the promise
+ * settles, matching the original behaviour.
+ */
+async function runUnderLease(fn, leaseId, release) {
+  const value = fn(leaseId);
+  if (value != null && typeof value[Symbol.asyncIterator] === 'function') {
+    return (async function* () {
+      try {
+        yield* value;
+      } finally {
+        release();
+      }
+    })();
+  }
   try {
-    return await fn(granted);
+    return await value;
   } finally {
-    tan.release(granted);
+    release();
   }
 }

@@ -107,6 +107,45 @@ test('withLease gates end-to-end and runs the work under the lease', async () =>
   });
 });
 
+test('withLease holds a stream lease until the stream is consumed, not just created', async () => {
+  await withClients(['a', 'b'], async ({ a, b }) => {
+    let releaseStream;
+    const streamGate = new Promise((resolve) => { releaseStream = resolve; });
+    let produced = 0;
+    const stream = (async function* () {
+      produced += 1;
+      yield 'chunk-1';
+      await streamGate; // pause mid-stream: the "generation" is in flight
+      yield 'chunk-2';
+    })();
+
+    const pending = withLease(a, { model: 'small-dense', kind: 'call' }, () => stream);
+    const chunks = [];
+    const consumer = (async () => {
+      for await (const chunk of await pending) chunks.push(chunk);
+    })();
+
+    // Let the first chunk flow, then the stream is parked mid-generation.
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(produced, 1);
+
+    // While paused mid-stream the lease MUST still be held: b is queued, not granted.
+    // (The old early-release bug freed the lease the instant the stream object
+    // existed, so b would have been granted here.)
+    const queued = await b.acquire({ model: 'small-dense' });
+    assert.equal(queued.status, 'queued');
+
+    // Finish the stream; the lease is released only after consumption completes.
+    releaseStream();
+    await consumer;
+    assert.deepEqual(chunks, ['chunk-1', 'chunk-2']);
+
+    const wait = await b.waitFor({ waiterId: queued.waiterId });
+    assert.equal(wait.status, 'granted');
+    b.release(wait.leaseId);
+  });
+});
+
 test('aborting while queued cancels the waiter and rejects', async () => {
   await withClients(['a', 'b'], async ({ a, b }) => {
     const lease = await a.acquire({ model: 'small-dense' });
